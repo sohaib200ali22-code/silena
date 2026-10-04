@@ -10,8 +10,25 @@ const client = new Client({
     ]
 });
 
+const MAX_TIMEOUT_MINUTES = 28 * 24 * 60;
+
+function hasPermission(interaction, permission) {
+    return interaction.member?.permissions?.has(permission) ?? false;
+}
+
+function ensurePermission(interaction, permission, commandName) {
+    if (!hasPermission(interaction, permission)) {
+        return interaction.reply({
+            content: `You do not have permission to use /${commandName}.`,
+            ephemeral: true
+        });
+    }
+
+    return null;
+}
+
 // Auto-Mod configuration
-const BANNED_WORDS = ['badword1', 'badword2']; // Add words to filter here
+const BANNED_WORDS = ['badword1', 'badword2'];
 const INVITE_REGEX = /(discord\.(gg|io|me|li)|discordapp\.com\/invite)\/.+/i;
 
 client.once('ready', () => {
@@ -22,25 +39,26 @@ client.once('ready', () => {
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // Skip automod for Administrators
-    if (message.member.permissions.has(PermissionFlagsBits.Administrator)) return;
+    if (message.member?.permissions?.has(PermissionFlagsBits.Administrator)) return;
 
-    // 1. Anti-Invite Links Filter
     if (INVITE_REGEX.test(message.content)) {
         await message.delete().catch(() => {});
         return message.channel.send(`⚠️ ${message.author}, invite links are not allowed here!`)
             .then(msg => setTimeout(() => msg.delete().catch(() => {}), 5000));
     }
 
-    // 2. Bad Words Filter
-    const containsBannedWord = BANNED_WORDS.some(word => message.content.toLowerCase().includes(word));
+    const normalizedMessage = message.content.toLowerCase();
+    const containsBannedWord = BANNED_WORDS.some(word => {
+        const normalizedWord = word.trim().toLowerCase();
+        return normalizedWord && normalizedMessage.includes(normalizedWord);
+    });
+
     if (containsBannedWord) {
         await message.delete().catch(() => {});
         return message.channel.send(`⚠️ ${message.author}, watch your language!`)
             .then(msg => setTimeout(() => msg.delete().catch(() => {}), 5000));
     }
 
-    // 3. Anti-Mass Mentions (> 5 mentions)
     if (message.mentions.users.size > 5) {
         await message.delete().catch(() => {});
         return message.channel.send(`⚠️ ${message.author}, mass mentions are prohibited.`)
@@ -54,10 +72,12 @@ client.on('interactionCreate', async (interaction) => {
 
     const { commandName, options } = interaction;
 
-    // Command: /clear
     if (commandName === 'clear') {
+        const permissionCheck = ensurePermission(interaction, PermissionFlagsBits.ManageMessages, commandName);
+        if (permissionCheck) return permissionCheck;
+
         const amount = options.getInteger('amount');
-        if (amount < 1 || amount > 100) {
+        if (!Number.isInteger(amount) || amount < 1 || amount > 100) {
             return interaction.reply({ content: 'Please provide a number between 1 and 100.', ephemeral: true });
         }
 
@@ -73,11 +93,21 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `🧹 Successfully deleted ${deleted.size} messages!`, ephemeral: true });
     }
 
-    // Command: /timeout
     if (commandName === 'timeout') {
+        const permissionCheck = ensurePermission(interaction, PermissionFlagsBits.ModerateMembers, commandName);
+        if (permissionCheck) return permissionCheck;
+
         const user = options.getUser('target');
         const duration = options.getInteger('duration');
         const reason = options.getString('reason') || 'No reason provided';
+
+        if (!Number.isInteger(duration) || duration < 1 || duration > MAX_TIMEOUT_MINUTES) {
+            return interaction.reply({
+                content: `Timeout duration must be between 1 and ${MAX_TIMEOUT_MINUTES} minutes (28 days).`,
+                ephemeral: true
+            });
+        }
+
         const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
 
         if (!targetMember) return interaction.reply({ content: 'Member not found.', ephemeral: true });
@@ -98,8 +128,10 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ embeds: [embed] });
     }
 
-    // Command: /warn
     if (commandName === 'warn') {
+        const permissionCheck = ensurePermission(interaction, PermissionFlagsBits.ModerateMembers, commandName);
+        if (permissionCheck) return permissionCheck;
+
         const user = options.getUser('target');
         const reason = options.getString('reason');
 
@@ -116,8 +148,10 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ embeds: [embed] });
     }
 
-    // Command: /kick
     if (commandName === 'kick') {
+        const permissionCheck = ensurePermission(interaction, PermissionFlagsBits.KickMembers, commandName);
+        if (permissionCheck) return permissionCheck;
+
         const user = options.getUser('target');
         const reason = options.getString('reason') || 'No reason provided';
         const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
@@ -129,8 +163,10 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `👞 **${user.tag}** was kicked. Reason: ${reason}` });
     }
 
-    // Command: /ban
     if (commandName === 'ban') {
+        const permissionCheck = ensurePermission(interaction, PermissionFlagsBits.BanMembers, commandName);
+        if (permissionCheck) return permissionCheck;
+
         const user = options.getUser('target');
         const reason = options.getString('reason') || 'No reason provided';
         const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
@@ -144,4 +180,9 @@ client.on('interactionCreate', async (interaction) => {
     }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+const token = process.env.DISCORD_TOKEN;
+if (!token) {
+    throw new Error('DISCORD_TOKEN is not set.');
+}
+
+client.login(token);
