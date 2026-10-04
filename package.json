@@ -1,0 +1,13 @@
+{
+  "name": "silena-bot",
+  "version": "1.0.0",
+  "description": "Private Discord bot for moderation and administration",
+  "main": "index.js",
+  "scripts": {
+    "start": "node deploy-commands.js && node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5"
+  }
+}
