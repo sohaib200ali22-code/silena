@@ -1,6 +1,16 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, PermissionFlagsBits, EmbedBuilder } = require('discord.js');
 
+const {
+    Client,
+    EmbedBuilder,
+    Events,
+    GatewayIntentBits,
+    PermissionFlagsBits
+} = require('discord.js');
+const { readConfig } = require('./config');
+const { createSpamTracker, getAutomodViolation } = require('./automod');
+
+const config = readConfig(process.env);
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -9,180 +19,280 @@ const client = new Client({
         GatewayIntentBits.GuildMembers
     ]
 });
+const spamTracker = createSpamTracker({
+    limit: config.spamMaxMessages,
+    windowMs: config.spamWindowSeconds * 1000
+});
 
-const MAX_TIMEOUT_MINUTES = 28 * 24 * 60;
+const commandPermissions = {
+    clear: PermissionFlagsBits.ManageMessages,
+    timeout: PermissionFlagsBits.ModerateMembers,
+    warn: PermissionFlagsBits.ModerateMembers,
+    kick: PermissionFlagsBits.KickMembers,
+    ban: PermissionFlagsBits.BanMembers
+};
 
-function hasPermission(interaction, permission) {
-    return interaction.member?.permissions?.has(permission) ?? false;
+function logEvent(type, details) {
+    console.info(JSON.stringify({ type, at: new Date().toISOString(), ...details }));
 }
 
-function ensurePermission(interaction, permission, commandName) {
-    if (!hasPermission(interaction, permission)) {
+function reportError(context, error) {
+    console.error(`${context}:`, error);
+}
+
+async function leaveUnconfiguredGuild(guild) {
+    if (guild.id === config.guildId) return;
+
+    logEvent('unconfigured_guild_leave', { guildId: guild.id });
+    try {
+        await guild.leave();
+    } catch (error) {
+        reportError(`Unable to leave unconfigured guild ${guild.id}`, error);
+    }
+}
+
+client.once(Events.ClientReady, readyClient => {
+    logEvent('ready', { bot: readyClient.user.tag, guildId: config.guildId });
+    for (const guild of readyClient.guilds.cache.values()) {
+        leaveUnconfiguredGuild(guild);
+    }
+    readyClient.guilds.fetch(config.guildId).then(
+        guild => logEvent('configured_guild_ready', { guildId: guild.id, name: guild.name }),
+        error => reportError(`Unable to access configured guild ${config.guildId}`, error)
+    );
+});
+
+client.on(Events.GuildCreate, guild => {
+    leaveUnconfiguredGuild(guild);
+});
+
+async function handleAutomod(message) {
+    if (
+        !message.guild ||
+        message.guild.id !== config.guildId ||
+        message.author.bot ||
+        message.webhookId ||
+        message.author.id === config.ownerId ||
+        message.member?.permissions.has(PermissionFlagsBits.Administrator)
+    ) {
+        return;
+    }
+
+    const violation = getAutomodViolation(message.content, {
+        blockInvites: config.blockInvites,
+        blockLinks: config.blockLinks,
+        mentionLimit: 5
+    }) || spamTracker.record(message.guild.id, message.author.id);
+
+    if (!violation) return;
+
+    try {
+        await message.delete();
+    } catch (error) {
+        reportError(`Automod could not delete message ${message.id}`, error);
+        return;
+    }
+
+    logEvent('automod_action', {
+        guildId: message.guild.id,
+        channelId: message.channel.id,
+        userId: message.author.id,
+        messageId: message.id,
+        rule: violation
+    });
+
+    try {
+        const notice = await message.channel.send({
+            content: `<@${message.author.id}> Your message was removed by Silena's ${violation} rule.`,
+            allowedMentions: { users: [message.author.id] }
+        });
+        setTimeout(() => {
+            notice.delete().catch(error => reportError('Unable to remove automod notice', error));
+        }, 5000).unref?.();
+    } catch (error) {
+        reportError('Unable to send automod notice', error);
+    }
+}
+
+client.on(Events.MessageCreate, message => {
+    handleAutomod(message).catch(error => reportError('Automod handler failed', error));
+});
+
+async function handleCommand(interaction) {
+    if (!interaction.isChatInputCommand()) return;
+
+    if (!interaction.inGuild() || interaction.guildId !== config.guildId) {
+        return interaction.reply({ content: 'This command is only available in the configured server.', ephemeral: true });
+    }
+
+    if (interaction.user.id !== config.ownerId) {
+        logEvent('command_denied', {
+            guildId: interaction.guildId,
+            userId: interaction.user.id,
+            command: interaction.commandName,
+            reason: 'not_bot_owner'
+        });
+        return interaction.reply({ content: 'Only the configured bot owner can use Silena commands.', ephemeral: true });
+    }
+
+    const requiredPermission = commandPermissions[interaction.commandName];
+    if (!requiredPermission) {
+        return interaction.reply({ content: 'Unknown command.', ephemeral: true });
+    }
+
+    if (!interaction.memberPermissions?.has(requiredPermission)) {
+        return interaction.reply({ content: 'You lack the server permission required for this command.', ephemeral: true });
+    }
+
+    const requiredBotPermission = interaction.commandName === 'warn'
+        ? null
+        : interaction.commandName === 'clear'
+            ? PermissionFlagsBits.ManageMessages
+            : interaction.commandName === 'timeout'
+                ? PermissionFlagsBits.ModerateMembers
+                : interaction.commandName === 'kick'
+                    ? PermissionFlagsBits.KickMembers
+                    : PermissionFlagsBits.BanMembers;
+    if (requiredBotPermission && !interaction.appPermissions.has(requiredBotPermission)) {
+        return interaction.reply({ content: 'Silena lacks the server permission required for this command.', ephemeral: true });
+    }
+
+    const { commandName, options, guild } = interaction;
+    const reason = options.getString('reason') || 'No reason provided';
+    let targetUser;
+    let targetMember;
+
+    if (['timeout', 'warn', 'kick', 'ban'].includes(commandName)) {
+        targetUser = options.getUser('target');
+        if (
+            targetUser.id === config.ownerId ||
+            targetUser.id === interaction.user.id ||
+            targetUser.id === client.user.id
+        ) {
+            return interaction.reply({ content: 'You cannot moderate yourself, Silena, or the configured bot owner.', ephemeral: true });
+        }
+        targetMember = await guild.members.fetch(targetUser.id).catch(error => {
+            if (error.code !== 10007) throw error;
+            return null;
+        });
+    }
+
+    if (commandName === 'clear') {
+        const amount = options.getInteger('amount');
+        if (!interaction.channel?.isTextBased() || !interaction.channel.bulkDelete) {
+            return interaction.reply({ content: 'This command can only be used in a text channel.', ephemeral: true });
+        }
+
+        const deleted = await interaction.channel.bulkDelete(amount, true);
+        logEvent('moderation_action', {
+            guildId: guild.id,
+            channelId: interaction.channelId,
+            actorId: interaction.user.id,
+            command: commandName,
+            amount: deleted.size
+        });
         return interaction.reply({
-            content: `You do not have permission to use /${commandName}.`,
+            content: `Deleted ${deleted.size} message(s). Messages older than 14 days are not eligible for bulk deletion.`,
             ephemeral: true
         });
     }
 
-    return null;
-}
-
-// Auto-Mod configuration
-const BANNED_WORDS = ['badword1', 'badword2'];
-const INVITE_REGEX = /(discord\.(gg|io|me|li)|discordapp\.com\/invite)\/.+/i;
-
-client.once('ready', () => {
-    console.log(`✨ ${client.user.tag} (Silena) is online and ready!`);
-});
-
-// --- Auto-Mod System ---
-client.on('messageCreate', async (message) => {
-    if (message.author.bot || !message.guild) return;
-
-    if (message.member?.permissions?.has(PermissionFlagsBits.Administrator)) return;
-
-    if (INVITE_REGEX.test(message.content)) {
-        await message.delete().catch(() => {});
-        return message.channel.send(`⚠️ ${message.author}, invite links are not allowed here!`)
-            .then(msg => setTimeout(() => msg.delete().catch(() => {}), 5000));
-    }
-
-    const normalizedMessage = message.content.toLowerCase();
-    const containsBannedWord = BANNED_WORDS.some(word => {
-        const normalizedWord = word.trim().toLowerCase();
-        return normalizedWord && normalizedMessage.includes(normalizedWord);
-    });
-
-    if (containsBannedWord) {
-        await message.delete().catch(() => {});
-        return message.channel.send(`⚠️ ${message.author}, watch your language!`)
-            .then(msg => setTimeout(() => msg.delete().catch(() => {}), 5000));
-    }
-
-    if (message.mentions.users.size > 5) {
-        await message.delete().catch(() => {});
-        return message.channel.send(`⚠️ ${message.author}, mass mentions are prohibited.`)
-            .then(msg => setTimeout(() => msg.delete().catch(() => {}), 5000));
-    }
-});
-
-// --- Admin & Moderation Slash Commands ---
-client.on('interactionCreate', async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
-
-    const { commandName, options } = interaction;
-
-    if (commandName === 'clear') {
-        const permissionCheck = ensurePermission(interaction, PermissionFlagsBits.ManageMessages, commandName);
-        if (permissionCheck) return permissionCheck;
-
-        const amount = options.getInteger('amount');
-        if (!Number.isInteger(amount) || amount < 1 || amount > 100) {
-            return interaction.reply({ content: 'Please provide a number between 1 and 100.', ephemeral: true });
-        }
-
-        const deleted = await interaction.channel.bulkDelete(amount, true).catch(err => {
-            console.error(err);
-            return null;
-        });
-
-        if (!deleted) {
-            return interaction.reply({ content: 'Failed to purge messages. Messages older than 14 days cannot be bulk deleted.', ephemeral: true });
-        }
-
-        return interaction.reply({ content: `🧹 Successfully deleted ${deleted.size} messages!`, ephemeral: true });
-    }
-
     if (commandName === 'timeout') {
-        const permissionCheck = ensurePermission(interaction, PermissionFlagsBits.ModerateMembers, commandName);
-        if (permissionCheck) return permissionCheck;
-
-        const user = options.getUser('target');
-        const duration = options.getInteger('duration');
-        const reason = options.getString('reason') || 'No reason provided';
-
-        if (!Number.isInteger(duration) || duration < 1 || duration > MAX_TIMEOUT_MINUTES) {
-            return interaction.reply({
-                content: `Timeout duration must be between 1 and ${MAX_TIMEOUT_MINUTES} minutes (28 days).`,
-                ephemeral: true
-            });
-        }
-
-        const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
-
-        if (!targetMember) return interaction.reply({ content: 'Member not found.', ephemeral: true });
+        if (!targetMember) return interaction.reply({ content: 'That user is not a member of this server.', ephemeral: true });
         if (!targetMember.moderatable) return interaction.reply({ content: 'I cannot timeout this user due to role hierarchy.', ephemeral: true });
 
+        const duration = options.getInteger('duration');
         await targetMember.timeout(duration * 60 * 1000, reason);
+        logEvent('moderation_action', {
+            guildId: guild.id,
+            actorId: interaction.user.id,
+            targetId: targetUser.id,
+            command: commandName,
+            durationMinutes: duration,
+            reason
+        });
 
         const embed = new EmbedBuilder()
-            .setTitle('🔇 Member Timed Out')
+            .setTitle('Member Timed Out')
             .setColor(0xFEE75C)
             .addFields(
-                { name: 'User', value: `${user.tag}`, inline: true },
+                { name: 'User', value: targetUser.tag, inline: true },
                 { name: 'Duration', value: `${duration} minute(s)`, inline: true },
                 { name: 'Reason', value: reason }
             )
             .setTimestamp();
-
         return interaction.reply({ embeds: [embed] });
     }
 
     if (commandName === 'warn') {
-        const permissionCheck = ensurePermission(interaction, PermissionFlagsBits.ModerateMembers, commandName);
-        if (permissionCheck) return permissionCheck;
-
-        const user = options.getUser('target');
-        const reason = options.getString('reason');
+        if (!targetMember) return interaction.reply({ content: 'That user is not a member of this server.', ephemeral: true });
+        logEvent('moderation_action', {
+            guildId: guild.id,
+            actorId: interaction.user.id,
+            targetId: targetUser.id,
+            command: commandName,
+            reason
+        });
 
         const embed = new EmbedBuilder()
-            .setTitle('⚠️ Warning Issued')
+            .setTitle('Warning Issued')
             .setColor(0xED4245)
             .addFields(
-                { name: 'User', value: `${user.tag}`, inline: true },
-                { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
+                { name: 'User', value: targetUser.tag, inline: true },
+                { name: 'Moderator', value: interaction.user.tag, inline: true },
                 { name: 'Reason', value: reason }
             )
             .setTimestamp();
-
         return interaction.reply({ embeds: [embed] });
     }
 
     if (commandName === 'kick') {
-        const permissionCheck = ensurePermission(interaction, PermissionFlagsBits.KickMembers, commandName);
-        if (permissionCheck) return permissionCheck;
-
-        const user = options.getUser('target');
-        const reason = options.getString('reason') || 'No reason provided';
-        const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
-
-        if (!targetMember) return interaction.reply({ content: 'Member not found.', ephemeral: true });
+        if (!targetMember) return interaction.reply({ content: 'That user is not a member of this server.', ephemeral: true });
         if (!targetMember.kickable) return interaction.reply({ content: 'I cannot kick this user due to role hierarchy.', ephemeral: true });
 
         await targetMember.kick(reason);
-        return interaction.reply({ content: `👞 **${user.tag}** was kicked. Reason: ${reason}` });
+        logEvent('moderation_action', {
+            guildId: guild.id,
+            actorId: interaction.user.id,
+            targetId: targetUser.id,
+            command: commandName,
+            reason
+        });
+        return interaction.reply({ content: `**${targetUser.tag}** was kicked. Reason: ${reason}` });
     }
 
     if (commandName === 'ban') {
-        const permissionCheck = ensurePermission(interaction, PermissionFlagsBits.BanMembers, commandName);
-        if (permissionCheck) return permissionCheck;
-
-        const user = options.getUser('target');
-        const reason = options.getString('reason') || 'No reason provided';
-        const targetMember = await interaction.guild.members.fetch(user.id).catch(() => null);
-
         if (targetMember && !targetMember.bannable) {
             return interaction.reply({ content: 'I cannot ban this user due to role hierarchy.', ephemeral: true });
         }
 
-        await interaction.guild.members.ban(user.id, { reason });
-        return interaction.reply({ content: `🔨 **${user.tag}** was banned. Reason: ${reason}` });
+        await guild.members.ban(targetUser.id, { reason });
+        logEvent('moderation_action', {
+            guildId: guild.id,
+            actorId: interaction.user.id,
+            targetId: targetUser.id,
+            command: commandName,
+            reason
+        });
+        return interaction.reply({ content: `**${targetUser.tag}** was banned. Reason: ${reason}` });
     }
-});
 
-const token = process.env.DISCORD_TOKEN;
-if (!token) {
-    throw new Error('DISCORD_TOKEN is not set.');
+    return interaction.reply({ content: 'Unknown command.', ephemeral: true });
 }
 
-client.login(token);
+client.on(Events.InteractionCreate, interaction => {
+    handleCommand(interaction).catch(async error => {
+        reportError(`Command ${interaction.commandName || 'unknown'} failed`, error);
+        const response = { content: 'The command failed. Check the bot logs for details.', ephemeral: true };
+        if (interaction.deferred || interaction.replied) {
+            await interaction.followUp(response).catch(replyError => reportError('Unable to report command failure', replyError));
+        } else {
+            await interaction.reply(response).catch(replyError => reportError('Unable to report command failure', replyError));
+        }
+    });
+});
+
+client.login(config.token).catch(error => {
+    reportError('Discord login failed', error);
+    process.exitCode = 1;
+});
