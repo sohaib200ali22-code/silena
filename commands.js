@@ -57,6 +57,9 @@ function createCommandDefinitions() {
         new SlashCommandBuilder()
             .setName('announcement')
             .setDescription('Create and preview a Silena-branded announcement')
+            .addBooleanOption(option =>
+                option.setName('mention_everyone')
+                    .setDescription('Explicitly ask for a separate confirmation to notify everyone'))
             .addChannelOption(option =>
                 option.setName('channel')
                     .setDescription('Destination channel (defaults to this channel)')

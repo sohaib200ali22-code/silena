@@ -50,12 +50,16 @@ function createAnnouncementFlow({ client, config, createSilenaEmbed, logEvent, r
             );
     }
 
-    function createButtons(id, revision) {
+    function createButtons(id, revision, confirmEveryone = false) {
         return new ActionRowBuilder().addComponents(
             new ButtonBuilder()
-                .setCustomId(`announcement:send:${id}:${revision}`)
-                .setLabel('Send')
-                .setStyle(ButtonStyle.Success),
+                .setCustomId(
+                    confirmEveryone
+                        ? `announcement:confirm-everyone:${id}:${revision}`
+                        : `announcement:send:${id}:${revision}`
+                )
+                .setLabel(confirmEveryone ? 'Confirm @everyone' : 'Send')
+                .setStyle(confirmEveryone ? ButtonStyle.Danger : ButtonStyle.Success),
             new ButtonBuilder()
                 .setCustomId(`announcement:edit:${id}:${revision}`)
                 .setLabel('Edit')
@@ -77,7 +81,7 @@ function createAnnouncementFlow({ client, config, createSilenaEmbed, logEvent, r
         return interaction.reply({ content: message, ephemeral: true });
     }
 
-    function validDestination(channel) {
+    function validDestination(channel, mentionEveryone = false) {
         if (
             !channel ||
             channel.guildId !== config.guildId ||
@@ -91,13 +95,24 @@ function createAnnouncementFlow({ client, config, createSilenaEmbed, logEvent, r
         if (!permissions?.has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
             return 'Silena needs Send Messages and Embed Links in the announcement channel.';
         }
+        if (mentionEveryone && !permissions.has(PermissionFlagsBits.MentionEveryone)) {
+            return 'Silena needs Mention Everyone permission in the announcement channel to notify everyone.';
+        }
         return null;
+    }
+
+    function canOwnerMentionEveryone(interaction) {
+        return interaction.memberPermissions?.has(PermissionFlagsBits.MentionEveryone);
     }
 
     async function start(interaction) {
         const destination = interaction.options.getChannel('channel') || interaction.channel;
-        const destinationError = validDestination(destination);
+        const mentionEveryone = interaction.options.getBoolean('mention_everyone') || false;
+        const destinationError = validDestination(destination, mentionEveryone);
         if (destinationError) return deny(interaction, destinationError);
+        if (mentionEveryone && !canOwnerMentionEveryone(interaction)) {
+            return deny(interaction, 'You need Mention Everyone permission in this server to request an @everyone announcement.');
+        }
 
         const id = randomUUID();
         const expiryTimer = setTimeout(() => previews.delete(id), PREVIEW_TTL_MS);
@@ -106,6 +121,7 @@ function createAnnouncementFlow({ client, config, createSilenaEmbed, logEvent, r
             ownerId: interaction.user.id,
             guildId: interaction.guildId,
             destinationId: destination.id,
+            mentionEveryone,
             status: 'editing',
             revision: 0,
             expiryTimer
@@ -122,7 +138,7 @@ function createAnnouncementFlow({ client, config, createSilenaEmbed, logEvent, r
         if (!isAuthorized(interaction) || preview.ownerId !== interaction.user.id || preview.guildId !== interaction.guildId) {
             return deny(interaction, 'Only the configured bot owner can edit this announcement.');
         }
-        if (preview.status !== 'editing' && preview.status !== 'ready') {
+        if (preview.status !== 'editing' && preview.status !== 'ready' && preview.status !== 'confirming') {
             return deny(interaction, 'This announcement modal is no longer active.');
         }
 
@@ -142,7 +158,7 @@ function createAnnouncementFlow({ client, config, createSilenaEmbed, logEvent, r
         preview.status = 'ready';
         preview.revision += 1;
         return interaction.reply({
-            content: `Preview for <#${preview.destinationId}>. Nothing is public until you choose **Send**.`,
+            content: `${preview.mentionEveryone ? '⚠️ @everyone will be mentioned if you confirm. ' : ''}Preview for <#${preview.destinationId}>. Nothing is public until you choose **Send**.`,
             embeds: [createSilenaEmbed(title, message)],
             components: [createButtons(id, preview.revision)],
             allowedMentions: { parse: [] },
@@ -151,7 +167,7 @@ function createAnnouncementFlow({ client, config, createSilenaEmbed, logEvent, r
     }
 
     async function handleButton(interaction) {
-        const match = /^announcement:(send|edit|cancel):([0-9a-f-]{36}):(\d+)$/.exec(interaction.customId);
+        const match = /^announcement:(send|confirm-everyone|edit|cancel):([0-9a-f-]{36}):(\d+)$/.exec(interaction.customId);
         if (!match) return;
         const [, action, id, revisionText] = match;
         const preview = previews.get(id);
@@ -162,14 +178,16 @@ function createAnnouncementFlow({ client, config, createSilenaEmbed, logEvent, r
         if (Number(revisionText) !== preview.revision) {
             return deny(interaction, 'This preview has been replaced by a newer edit. Use the latest preview controls.');
         }
-        if (preview.status !== 'ready') {
-            return deny(interaction, 'This announcement preview is not ready or is already being sent.');
-        }
-
         if (action === 'edit') {
+            if (!['ready', 'confirming'].includes(preview.status)) {
+                return deny(interaction, 'This announcement preview is not ready or is already being sent.');
+            }
             return interaction.showModal(createModal(id, preview));
         }
         if (action === 'cancel') {
+            if (!['ready', 'confirming'].includes(preview.status)) {
+                return deny(interaction, 'This announcement preview is not ready or is already being sent.');
+            }
             clearPreview(id);
             return interaction.update({
                 content: 'Announcement cancelled. Nothing was published.',
@@ -178,15 +196,51 @@ function createAnnouncementFlow({ client, config, createSilenaEmbed, logEvent, r
             });
         }
 
+        if (preview.mentionEveryone && action === 'send') {
+            if (preview.status !== 'ready') {
+                return deny(interaction, 'This announcement preview is not ready or is already being sent.');
+            }
+            if (!canOwnerMentionEveryone(interaction)) {
+                return deny(interaction, 'You need Mention Everyone permission in this server to confirm this announcement.');
+            }
+            preview.status = 'confirming';
+            return interaction.update({
+                content: `⚠️ **Final confirmation required:** this will send an @everyone notification in <#${preview.destinationId}>. User and role mentions in the title/message will not notify anyone.`,
+                embeds: [createSilenaEmbed(preview.title, preview.message)],
+                components: [createButtons(id, preview.revision, true)],
+                allowedMentions: { parse: [] }
+            });
+        }
+        if (preview.mentionEveryone && action === 'confirm-everyone' && preview.status !== 'confirming') {
+            return deny(interaction, 'The @everyone confirmation step is no longer active.');
+        }
+        if (!preview.mentionEveryone && (action !== 'send' || preview.status !== 'ready')) {
+            return deny(interaction, 'This announcement action is not valid for its current confirmation step.');
+        }
+        if (preview.mentionEveryone && action !== 'confirm-everyone') {
+            return deny(interaction, 'This announcement action is not valid for its current confirmation step.');
+        }
+        if (preview.mentionEveryone && !canOwnerMentionEveryone(interaction)) {
+            return deny(interaction, 'You need Mention Everyone permission in this server to confirm this announcement.');
+        }
+
         preview.status = 'sending';
         let announcement;
         try {
             const destination = await client.channels.fetch(preview.destinationId);
-            const destinationError = validDestination(destination);
+            const destinationError = validDestination(destination, preview.mentionEveryone);
             if (destinationError) throw new Error(destinationError);
+            if (preview.mentionEveryone && !canOwnerMentionEveryone(interaction)) {
+                throw new Error('You no longer have Mention Everyone permission in this server.');
+            }
             announcement = await destination.send({
+                ...(preview.mentionEveryone ? { content: '@everyone' } : {}),
                 embeds: [createSilenaEmbed(preview.title, preview.message)],
-                allowedMentions: { parse: [] }
+                allowedMentions: {
+                    parse: preview.mentionEveryone ? ['everyone'] : [],
+                    users: [],
+                    roles: []
+                }
             });
         } catch (error) {
             preview.status = 'ready';
@@ -205,7 +259,8 @@ function createAnnouncementFlow({ client, config, createSilenaEmbed, logEvent, r
             channelId: preview.destinationId,
             messageId: announcement.id,
             actorId: preview.ownerId,
-            title: preview.title
+            title: preview.title,
+            mentionEveryone: preview.mentionEveryone
         });
         try {
             return await interaction.update({
