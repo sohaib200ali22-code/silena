@@ -17,6 +17,13 @@ const { createHealthServer } = require('./health-server');
 const { registerGuildCommands } = require('./register-commands');
 const { setChannelLocked } = require('./channel-lock');
 const { deleteUserMessages, scanRecentMessages } = require('./purge-user-messages');
+const {
+    canCloseTicket,
+    closePrivateTicket,
+    createPrivateTicket,
+    findOpenTicket,
+    parseTicketTopic
+} = require('./ticket-system');
 
 const config = readConfig(process.env);
 const client = new Client({
@@ -50,6 +57,7 @@ const botCommandPermissions = {
     ban: PermissionFlagsBits.BanMembers
 };
 const pendingUserPurges = new Map();
+const openingTickets = new Set();
 
 function logEvent(type, details) {
     console.info(JSON.stringify({ type, at: new Date().toISOString(), ...details }));
@@ -307,6 +315,13 @@ async function handleCommand(interaction) {
         return interaction.reply({ content: 'This command is only available in the configured server.', ephemeral: true });
     }
 
+    if (interaction.commandName === 'ticket') {
+        return handleTicketOpen(interaction);
+    }
+    if (interaction.commandName === 'close') {
+        return handleTicketClose(interaction);
+    }
+
     if (interaction.user.id !== config.ownerId) {
         logEvent('command_denied', {
             guildId: interaction.guildId,
@@ -488,6 +503,135 @@ async function handleCommand(interaction) {
     }
 
     return interaction.reply({ content: 'Unknown command.', ephemeral: true });
+}
+
+async function handleTicketOpen(interaction) {
+    const requiredBotPermissions = PermissionFlagsBits.ManageChannels | PermissionFlagsBits.ManageRoles;
+    if (!interaction.appPermissions?.has(requiredBotPermissions)) {
+        return interaction.reply({
+            content: 'Silena needs Manage Channels and Manage Roles permissions to create private tickets.',
+            ephemeral: true
+        });
+    }
+
+    const key = `${interaction.guildId}:${interaction.user.id}`;
+    if (openingTickets.has(key)) {
+        return interaction.reply({ content: 'Your ticket is already being created. Please wait a moment.', ephemeral: true });
+    }
+    openingTickets.add(key);
+
+    try {
+        await interaction.deferReply({ ephemeral: true });
+        const existing = await findOpenTicket(interaction.guild, interaction.user.id);
+        if (existing) {
+            return interaction.editReply(`You already have an open ticket: <#${existing.id}>.`);
+        }
+        const subject = interaction.options.getString('subject', true).trim();
+        if (!subject) {
+            return interaction.editReply('Please provide a short ticket subject.');
+        }
+
+        const ticket = await createPrivateTicket({
+            guild: interaction.guild,
+            opener: interaction.user,
+            staffRoleId: config.staffRoleId,
+            botUserId: client.user.id,
+            subject
+        });
+        logEvent('ticket_opened', {
+            guildId: interaction.guildId,
+            channelId: ticket.id,
+            openerId: interaction.user.id,
+            staffRoleId: config.staffRoleId,
+            subject
+        });
+        return interaction.editReply(`Your private ticket is ready: <#${ticket.id}>.`);
+    } catch (error) {
+        reportError('Ticket creation failed', error);
+        if (!interaction.deferred && !interaction.replied) {
+            return interaction.reply({ content: `Could not create your ticket: ${error.message}`, ephemeral: true });
+        }
+        if (error.cleanupError) {
+            reportError(`Failed to clean up ticket channel ${error.orphanedChannelId}`, error.cleanupError);
+            return interaction.editReply(
+                `Ticket setup failed because staff could not be notified, and cleanup also failed. Please contact staff; the unnotified channel is <#${error.orphanedChannelId}>.`
+            );
+        }
+        if (error.existingTicketId) {
+            return interaction.editReply(`You already have an open ticket: <#${error.existingTicketId}>.`);
+        }
+        return interaction.editReply(`Could not create your ticket: ${error.message}`);
+    } finally {
+        openingTickets.delete(key);
+    }
+}
+
+async function handleTicketClose(interaction) {
+    const channel = interaction.channel;
+    const ticket = parseTicketTopic(channel?.topic);
+    if (!ticket) {
+        return interaction.reply({ content: '/close can only be used in a Silena ticket channel.', ephemeral: true });
+    }
+
+    let memberRoleIds = [];
+    if (
+        interaction.user.id !== config.ownerId &&
+        interaction.user.id !== ticket.openerId
+    ) {
+        try {
+            const member = await interaction.guild.members.fetch(interaction.user.id);
+            memberRoleIds = [...member.roles.cache.keys()];
+        } catch (error) {
+            reportError('Unable to verify ticket closer roles', error);
+            return interaction.reply({ content: 'Could not verify your staff role. Please try again or contact the bot owner.', ephemeral: true });
+        }
+    }
+
+    if (!canCloseTicket({
+        userId: interaction.user.id,
+        ownerId: config.ownerId,
+        openerId: ticket.openerId,
+        staffRoleId: config.staffRoleId,
+        memberRoleIds
+    })) {
+        return interaction.reply({
+            content: 'Only the ticket opener, configured staff role, or bot owner can close this ticket.',
+            ephemeral: true
+        });
+    }
+
+    const requiredBotPermissions = PermissionFlagsBits.ManageChannels | PermissionFlagsBits.ManageRoles;
+    if (!interaction.appPermissions?.has(requiredBotPermissions) || !interaction.appPermissions.has(PermissionFlagsBits.SendMessages)) {
+        return interaction.reply({
+            content: 'Silena needs Send Messages, Manage Channels, and Manage Roles in this ticket to close it safely.',
+            ephemeral: true
+        });
+    }
+
+    const reason = interaction.options.getString('reason', true).trim();
+    if (!reason) {
+        return interaction.reply({ content: 'A close reason is required.', ephemeral: true });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    try {
+        await closePrivateTicket(channel, {
+            closerId: interaction.user.id,
+            closerTag: interaction.user.tag || interaction.user.username,
+            reason
+        });
+        logEvent('ticket_closed', {
+            guildId: interaction.guildId,
+            channelId: channel.id,
+            openerId: ticket.openerId,
+            closerId: interaction.user.id,
+            reason
+        });
+        return interaction.editReply(`Ticket archived. Reason: ${reason}`);
+    } catch (error) {
+        reportError(`Failed to archive ticket channel ${channel.id}`, error);
+        return interaction.editReply(`Could not fully archive this ticket: ${error.message}. The transcript has not been deleted; check bot permissions and retry.`);
+    }
 }
 
 client.on(Events.InteractionCreate, interaction => {

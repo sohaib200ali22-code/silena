@@ -6,18 +6,24 @@ const validEnvironment = {
     DISCORD_TOKEN: 'test-token-not-a-real-secret',
     CLIENT_ID: '12345678901234567',
     GUILD_ID: '23456789012345678',
-    OWNER_ID: '34567890123456789'
+    OWNER_ID: '34567890123456789',
+    STAFF_ROLE_ID: '45678901234567890'
 };
 
 test('requires all credentials and IDs', () => {
     assert.throws(() => readConfig({}), /DISCORD_TOKEN must be set/);
     assert.throws(() => readConfig({ ...validEnvironment, OWNER_ID: '' }), /OWNER_ID must be set/);
+    assert.throws(() => readConfig({ ...validEnvironment, STAFF_ROLE_ID: '' }), /STAFF_ROLE_ID must be set/);
 });
 
 test('rejects malformed Discord IDs', () => {
     assert.throws(
         () => readConfig({ ...validEnvironment, GUILD_ID: 'not-an-id' }),
         /GUILD_ID must be a Discord ID/
+    );
+    assert.throws(
+        () => readConfig({ ...validEnvironment, STAFF_ROLE_ID: 'not-a-role-id' }),
+        /STAFF_ROLE_ID must be a Discord ID/
     );
 });
 
@@ -27,6 +33,7 @@ test('applies conservative automod defaults and reads overrides', () => {
         clientId: validEnvironment.CLIENT_ID,
         guildId: validEnvironment.GUILD_ID,
         ownerId: validEnvironment.OWNER_ID,
+        staffRoleId: validEnvironment.STAFF_ROLE_ID,
         blockInvites: true,
         blockLinks: false,
         spamMaxMessages: 5,

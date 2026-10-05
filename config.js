@@ -33,8 +33,14 @@ function readConfig(env) {
     const clientId = requiredValue(env, 'CLIENT_ID');
     const guildId = requiredValue(env, 'GUILD_ID');
     const ownerId = requiredValue(env, 'OWNER_ID');
+    const staffRoleId = requiredValue(env, 'STAFF_ROLE_ID');
 
-    for (const [name, value] of Object.entries({ CLIENT_ID: clientId, GUILD_ID: guildId, OWNER_ID: ownerId })) {
+    for (const [name, value] of Object.entries({
+        CLIENT_ID: clientId,
+        GUILD_ID: guildId,
+        OWNER_ID: ownerId,
+        STAFF_ROLE_ID: staffRoleId
+    })) {
         if (!SNOWFLAKE_PATTERN.test(value)) {
             throw new Error(`${name} must be a Discord ID (17-20 digits).`);
         }
@@ -45,6 +51,7 @@ function readConfig(env) {
         clientId,
         guildId,
         ownerId,
+        staffRoleId,
         blockInvites: readBoolean(env, 'BLOCK_INVITES', true),
         blockLinks: readBoolean(env, 'BLOCK_LINKS', false),
         spamMaxMessages: readInteger(env, 'SPAM_MAX_MESSAGES', 5, 3, 20),
