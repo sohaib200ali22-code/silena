@@ -329,207 +329,220 @@ client.on(Events.MessageCreate, message => {
 });
 
 async function handleCommand(interaction) {
-    if (!interaction.isChatInputCommand()) return;
+    try {
+        if (!interaction.isChatInputCommand()) return;
 
-    if (!interaction.inGuild() || interaction.guildId !== config.guildId) {
-        return interaction.reply({ content: 'This command is only available in the configured server.', ephemeral: true });
-    }
-
-    if (interaction.commandName === 'ticket') {
-        return handleTicketOpen(interaction);
-    }
-    if (interaction.commandName === 'close') {
-        return handleTicketClose(interaction);
-    }
-
-    if (interaction.user.id !== config.ownerId) {
-        logEvent('command_denied', {
-            guildId: interaction.guildId,
-            userId: interaction.user.id,
-            command: interaction.commandName,
-            reason: 'not_bot_owner'
-        });
-        return interaction.reply({ content: 'Only the configured bot owner can use Silena commands.', ephemeral: true });
-    }
-
-    const requiredPermission = commandPermissions[interaction.commandName];
-    if (!requiredPermission) {
-        return interaction.reply({ content: 'Unknown command.', ephemeral: true });
-    }
-
-    if (!interaction.memberPermissions?.has(requiredPermission)) {
-        return interaction.reply({ content: 'You lack the server permission required for this command.', ephemeral: true });
-    }
-
-    const requiredBotPermission = botCommandPermissions[interaction.commandName];
-    if (requiredBotPermission && !interaction.appPermissions.has(requiredBotPermission)) {
-        return interaction.reply({ content: 'Silena lacks the server permission required for this command.', ephemeral: true });
-    }
-
-    const { commandName, options, guild } = interaction;
-    const reason = options.getString('reason') || 'No reason provided';
-    let targetUser;
-    let targetMember;
-
-    if (commandName === 'ticket-panel') {
-        return ticketPanelFlow.start(interaction);
-    }
-    if (commandName === 'announcement') {
-        return announcementFlow.start(interaction);
-    }
-
-    if (commandName === 'lock' || commandName === 'unlock') {
-        if (!interaction.channel) {
-            return interaction.reply({ content: 'This command requires a channel.', ephemeral: true });
+        if (!interaction.inGuild() || interaction.guildId !== config.guildId) {
+            return await interaction.reply({ content: 'This command is only available in the configured server.', ephemeral: true });
         }
 
-        const locked = commandName === 'lock';
-        await setChannelLocked(interaction.channel, locked, reason);
-        logEvent('moderation_action', {
-            guildId: guild.id,
-            channelId: interaction.channelId,
-            actorId: interaction.user.id,
-            command: commandName,
-            reason
-        });
-
-        return interaction.reply({
-            content: locked
-                ? 'This channel is locked for @everyone. Explicit member or role permissions may still allow sending messages.'
-                : 'The @everyone send-message override was removed. This channel follows its category and server permissions again.',
-            ephemeral: true
-        });
-    }
-
-    if (['timeout', 'warn', 'kick', 'ban'].includes(commandName)) {
-        targetUser = options.getUser('target');
-        if (
-            targetUser.id === config.ownerId ||
-            targetUser.id === interaction.user.id ||
-            targetUser.id === client.user.id
-        ) {
-            return interaction.reply({ content: 'You cannot moderate yourself, Silena, or the configured bot owner.', ephemeral: true });
+        if (interaction.commandName === 'ticket') {
+            return await handleTicketOpen(interaction);
         }
-        targetMember = await guild.members.fetch(targetUser.id).catch(error => {
-            if (error.code !== 10007) throw error;
-            return null;
-        });
-    }
+        if (interaction.commandName === 'close') {
+            return await handleTicketClose(interaction);
+        }
 
-    if (commandName === 'clear') {
-        const amount = options.getInteger('amount');
-        const targetUser = options.getUser('user');
-        if (targetUser) {
-            if (amount !== null && (!Number.isInteger(amount) || amount < 1 || amount > 1000)) {
-                return interaction.reply({ content: 'The user-filter deletion cap must be between 1 and 1,000.', ephemeral: true });
+        if (interaction.user.id !== config.ownerId) {
+            logEvent('command_denied', {
+                guildId: interaction.guildId,
+                userId: interaction.user.id,
+                command: interaction.commandName,
+                reason: 'not_bot_owner'
+            });
+            return await interaction.reply({ content: 'Only the configured bot owner can use Silena commands.', ephemeral: true });
+        }
+
+        const requiredPermission = commandPermissions[interaction.commandName];
+        if (!requiredPermission) {
+            return await interaction.reply({ content: 'Unknown command.', ephemeral: true });
+        }
+
+        if (!interaction.memberPermissions?.has(requiredPermission)) {
+            return await interaction.reply({ content: 'You lack the server permission required for this command.', ephemeral: true });
+        }
+
+        const requiredBotPermission = botCommandPermissions[interaction.commandName];
+        if (requiredBotPermission && !interaction.appPermissions.has(requiredBotPermission)) {
+            return await interaction.reply({ content: 'Silena lacks the server permission required for this command.', ephemeral: true });
+        }
+
+        const { commandName, options, guild } = interaction;
+        const reason = options.getString('reason') || 'No reason provided';
+        let targetUser;
+        let targetMember;
+
+        if (commandName === 'ticket-panel') {
+            return await ticketPanelFlow.start(interaction);
+        }
+        if (commandName === 'announcement') {
+            return await announcementFlow.start(interaction);
+        }
+
+        if (commandName === 'lock' || commandName === 'unlock') {
+            if (!interaction.channel) {
+                return await interaction.reply({ content: 'This command requires a channel.', ephemeral: true });
             }
-            return prepareUserPurge(interaction, targetUser, amount || 1000, reason);
-        }
-        if (!Number.isInteger(amount) || amount < 1 || amount > 100) {
-            return interaction.reply({
-                content: 'Provide an amount from 1 to 100, or select a user to scan up to 1,000 recent messages.',
+
+            const locked = commandName === 'lock';
+            await setChannelLocked(interaction.channel, locked, reason);
+            logEvent('moderation_action', {
+                guildId: guild.id,
+                channelId: interaction.channelId,
+                actorId: interaction.user.id,
+                command: commandName,
+                reason
+            });
+
+            return await interaction.reply({
+                content: locked
+                    ? 'This channel is locked for @everyone. Explicit member or role permissions may still allow sending messages.'
+                    : 'The @everyone send-message override was removed. This channel follows its category and server permissions again.',
                 ephemeral: true
             });
         }
-        if (!interaction.channel?.isTextBased() || !interaction.channel.bulkDelete) {
-            return interaction.reply({ content: 'This command can only be used in a text channel.', ephemeral: true });
+
+        if (['timeout', 'warn', 'kick', 'ban'].includes(commandName)) {
+            targetUser = options.getUser('target');
+            if (
+                targetUser.id === config.ownerId ||
+                targetUser.id === interaction.user.id ||
+                targetUser.id === client.user.id
+            ) {
+                return await interaction.reply({ content: 'You cannot moderate yourself, Silena, or the configured bot owner.', ephemeral: true });
+            }
+            targetMember = await guild.members.fetch(targetUser.id).catch(error => {
+                if (error.code !== 10007) throw error;
+                return null;
+            });
         }
 
-        const deleted = await interaction.channel.bulkDelete(amount, true);
-        logEvent('moderation_action', {
-            guildId: guild.id,
-            channelId: interaction.channelId,
-            actorId: interaction.user.id,
-            command: commandName,
-            amount: deleted.size
-        });
-        return interaction.reply({
-            content: `Deleted ${deleted.size} message(s). Messages older than 14 days are not eligible for bulk deletion.`,
+        if (commandName === 'clear') {
+            const amount = options.getInteger('amount');
+            const targetUser = options.getUser('user');
+            if (targetUser) {
+                if (amount !== null && (!Number.isInteger(amount) || amount < 1 || amount > 1000)) {
+                    return await interaction.reply({ content: 'The user-filter deletion cap must be between 1 and 1,000.', ephemeral: true });
+                }
+                return await prepareUserPurge(interaction, targetUser, amount || 1000, reason);
+            }
+            if (!Number.isInteger(amount) || amount < 1 || amount > 100) {
+                return await interaction.reply({
+                    content: 'Provide an amount from 1 to 100, or select a user to scan up to 1,000 recent messages.',
+                    ephemeral: true
+                });
+            }
+            if (!interaction.channel?.isTextBased() || !interaction.channel.bulkDelete) {
+                return await interaction.reply({ content: 'This command can only be used in a text channel.', ephemeral: true });
+            }
+
+            const deleted = await interaction.channel.bulkDelete(amount, true);
+            logEvent('moderation_action', {
+                guildId: guild.id,
+                channelId: interaction.channelId,
+                actorId: interaction.user.id,
+                command: commandName,
+                amount: deleted.size
+            });
+            return await interaction.reply({
+                content: `Deleted ${deleted.size} message(s). Messages older than 14 days are not eligible for bulk deletion.`,
+                ephemeral: true
+            });
+        }
+
+        if (commandName === 'timeout') {
+            if (!targetMember) return await interaction.reply({ content: 'That user is not a member of this server.', ephemeral: true });
+            if (!targetMember.moderatable) return await interaction.reply({ content: 'I cannot timeout this user due to role hierarchy.', ephemeral: true });
+
+            const duration = options.getInteger('duration');
+            await targetMember.timeout(duration * 60 * 1000, reason);
+            logEvent('moderation_action', {
+                guildId: guild.id,
+                actorId: interaction.user.id,
+                targetId: targetUser.id,
+                command: commandName,
+                durationMinutes: duration,
+                reason
+            });
+
+            const embed = new EmbedBuilder()
+                .setTitle('Member Timed Out')
+                .setColor(0xFEE75C)
+                .addFields(
+                    { name: 'User', value: targetUser.tag, inline: true },
+                    { name: 'Duration', value: `${duration} minute(s)`, inline: true },
+                    { name: 'Reason', value: reason }
+                )
+                .setTimestamp();
+            return await interaction.reply({ embeds: [embed] });
+        }
+
+        if (commandName === 'warn') {
+            if (!targetMember) return await interaction.reply({ content: 'That user is not a member of this server.', ephemeral: true });
+            logEvent('moderation_action', {
+                guildId: guild.id,
+                actorId: interaction.user.id,
+                targetId: targetUser.id,
+                command: commandName,
+                reason
+            });
+
+            const embed = new EmbedBuilder()
+                .setTitle('Warning Issued')
+                .setColor(0xED4245)
+                .addFields(
+                    { name: 'User', value: targetUser.tag, inline: true },
+                    { name: 'Moderator', value: interaction.user.tag, inline: true },
+                    { name: 'Reason', value: reason }
+                )
+                .setTimestamp();
+            return await interaction.reply({ embeds: [embed] });
+        }
+
+        if (commandName === 'kick') {
+            if (!targetMember) return await interaction.reply({ content: 'That user is not a member of this server.', ephemeral: true });
+            if (!targetMember.kickable) return await interaction.reply({ content: 'I cannot kick this user due to role hierarchy.', ephemeral: true });
+
+            await targetMember.kick(reason);
+            logEvent('moderation_action', {
+                guildId: guild.id,
+                actorId: interaction.user.id,
+                targetId: targetUser.id,
+                command: commandName,
+                reason
+            });
+            return await interaction.reply({ content: `**${targetUser.tag}** was kicked. Reason: ${reason}` });
+        }
+
+        if (commandName === 'ban') {
+            if (targetMember && !targetMember.bannable) {
+                return await interaction.reply({ content: 'I cannot ban this user due to role hierarchy.', ephemeral: true });
+            }
+
+            await guild.members.ban(targetUser.id, { reason });
+            logEvent('moderation_action', {
+                guildId: guild.id,
+                actorId: interaction.user.id,
+                targetId: targetUser.id,
+                command: commandName,
+                reason
+            });
+            return await interaction.reply({ content: `**${targetUser.tag}** was banned. Reason: ${reason}` });
+        }
+
+        return await interaction.reply({ content: 'Unknown command.', ephemeral: true });
+    } catch (error) {
+        console.error('Command Error:', error);
+        const response = {
+            content: 'The command failed. Check the bot logs for details.',
             ephemeral: true
-        });
-    }
-
-    if (commandName === 'timeout') {
-        if (!targetMember) return interaction.reply({ content: 'That user is not a member of this server.', ephemeral: true });
-        if (!targetMember.moderatable) return interaction.reply({ content: 'I cannot timeout this user due to role hierarchy.', ephemeral: true });
-
-        const duration = options.getInteger('duration');
-        await targetMember.timeout(duration * 60 * 1000, reason);
-        logEvent('moderation_action', {
-            guildId: guild.id,
-            actorId: interaction.user.id,
-            targetId: targetUser.id,
-            command: commandName,
-            durationMinutes: duration,
-            reason
-        });
-
-        const embed = new EmbedBuilder()
-            .setTitle('Member Timed Out')
-            .setColor(0xFEE75C)
-            .addFields(
-                { name: 'User', value: targetUser.tag, inline: true },
-                { name: 'Duration', value: `${duration} minute(s)`, inline: true },
-                { name: 'Reason', value: reason }
-            )
-            .setTimestamp();
-        return interaction.reply({ embeds: [embed] });
-    }
-
-    if (commandName === 'warn') {
-        if (!targetMember) return interaction.reply({ content: 'That user is not a member of this server.', ephemeral: true });
-        logEvent('moderation_action', {
-            guildId: guild.id,
-            actorId: interaction.user.id,
-            targetId: targetUser.id,
-            command: commandName,
-            reason
-        });
-
-        const embed = new EmbedBuilder()
-            .setTitle('Warning Issued')
-            .setColor(0xED4245)
-            .addFields(
-                { name: 'User', value: targetUser.tag, inline: true },
-                { name: 'Moderator', value: interaction.user.tag, inline: true },
-                { name: 'Reason', value: reason }
-            )
-            .setTimestamp();
-        return interaction.reply({ embeds: [embed] });
-    }
-
-    if (commandName === 'kick') {
-        if (!targetMember) return interaction.reply({ content: 'That user is not a member of this server.', ephemeral: true });
-        if (!targetMember.kickable) return interaction.reply({ content: 'I cannot kick this user due to role hierarchy.', ephemeral: true });
-
-        await targetMember.kick(reason);
-        logEvent('moderation_action', {
-            guildId: guild.id,
-            actorId: interaction.user.id,
-            targetId: targetUser.id,
-            command: commandName,
-            reason
-        });
-        return interaction.reply({ content: `**${targetUser.tag}** was kicked. Reason: ${reason}` });
-    }
-
-    if (commandName === 'ban') {
-        if (targetMember && !targetMember.bannable) {
-            return interaction.reply({ content: 'I cannot ban this user due to role hierarchy.', ephemeral: true });
+        };
+        if (interaction.deferred || interaction.replied) {
+            await interaction.followUp(response).catch(replyError => reportError('Unable to report command failure', replyError));
+        } else {
+            await interaction.reply(response).catch(replyError => reportError('Unable to report command failure', replyError));
         }
-
-        await guild.members.ban(targetUser.id, { reason });
-        logEvent('moderation_action', {
-            guildId: guild.id,
-            actorId: interaction.user.id,
-            targetId: targetUser.id,
-            command: commandName,
-            reason
-        });
-        return interaction.reply({ content: `**${targetUser.tag}** was banned. Reason: ${reason}` });
     }
-
-    return interaction.reply({ content: 'Unknown command.', ephemeral: true });
 }
 
 async function handleTicketOpen(interaction) {
