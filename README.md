@@ -45,4 +45,6 @@ Register commands after setting all four required environment variables. `deploy
 
 The included `render.yaml` defines Silena as a long-running Node background worker. Create or update the service from the Blueprint and set `DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, and `OWNER_ID` in Render's environment settings; the Blueprint deliberately does not contain secret values. Set optional automod variables there if you want different defaults. Render runs `npm ci` to build and `npm start` to launch the bot.
 
+Silena also starts an Express health endpoint at `GET /health` on `0.0.0.0:$PORT` (default port `10000`). It returns HTTP 200 when the Discord client is connected and 503 while it is starting. Render background workers do not expose inbound HTTP traffic or use web-service health checks, so this endpoint is not required for the current worker deployment; it is available if you later run Silena as a Render Web Service. An HTTP listener failure is logged but does not prevent Discord login.
+
 Register slash commands separately with `npm run deploy:commands` from a trusted machine configured with the same environment variables, or through an appropriately configured one-off environment. Do not deploy or paste the token into source files or logs.
