@@ -7,7 +7,7 @@ const ownerId = '34567890123456789';
 const guildId = '23456789012345678';
 const channelId = '45678901234567890';
 
-function createHarness() {
+function createHarness({ botCanMentionEveryone = true } = {}) {
     const sentMessages = [];
     const loggedEvents = [];
     const errors = [];
@@ -24,7 +24,8 @@ function createHarness() {
                 const requested = Array.isArray(permissions) ? permissions : [permissions];
                 return requested.every(permission =>
                     permission === PermissionFlagsBits.SendMessages ||
-                    permission === PermissionFlagsBits.EmbedLinks
+                    permission === PermissionFlagsBits.EmbedLinks ||
+                    (botCanMentionEveryone && permission === PermissionFlagsBits.MentionEveryone)
                 );
             }
         })
@@ -49,8 +50,9 @@ function createInteraction(overrides = {}) {
         user: { id: ownerId },
         guildId,
         inGuild: () => true,
-        options: { getChannel: () => null },
+        options: { getChannel: () => null, getBoolean: () => false },
         channel: null,
+        memberPermissions: { has: permission => permission === PermissionFlagsBits.MentionEveryone },
         reply: async payload => { interaction.replyPayload = payload; },
         showModal: async modal => { interaction.modal = modal; },
         update: async payload => { interaction.updatePayload = payload; },
@@ -61,7 +63,7 @@ function createInteraction(overrides = {}) {
 
 async function beginPreview(flow) {
     const start = createInteraction({
-        options: { getChannel: () => null },
+        options: { getChannel: () => null, getBoolean: () => false },
         channel: createHarness().destination
     });
     await flow.start(start);
@@ -80,7 +82,7 @@ async function beginPreview(flow) {
 test('collects announcement details privately and publishes only after explicit Send', async () => {
     const harness = createHarness();
     const start = createInteraction({
-        options: { getChannel: () => null },
+        options: { getChannel: () => null, getBoolean: () => false },
         channel: harness.destination
     });
 
@@ -105,7 +107,7 @@ test('collects announcement details privately and publishes only after explicit 
     const send = createInteraction({ customId: `announcement:send:${sessionId}:1` });
     await harness.flow.handleButton(send);
     assert.equal(harness.sentMessages.length, 1);
-    assert.deepEqual(harness.sentMessages[0].allowedMentions, { parse: [] });
+    assert.deepEqual(harness.sentMessages[0].allowedMentions, { parse: [], users: [], roles: [] });
     assert.equal(harness.sentMessages[0].embeds[0].title, 'Update');
     assert.equal(harness.sentMessages[0].embeds[0].description, 'Service is back.');
     assert.match(send.updatePayload.content, /Announcement posted/);
@@ -192,4 +194,88 @@ test('failed delivery preserves the preview and offers a retry', async () => {
     assert.match(send.updatePayload.content, /You can edit, cancel, or try sending again/);
     assert.equal(send.updatePayload.components.length, 1);
     assert.equal(harness.errors.length, 1);
+});
+
+test('everyone announcements require opt-in and an extra explicit confirmation', async () => {
+    const harness = createHarness();
+    const start = createInteraction({
+        options: {
+            getChannel: () => null,
+            getBoolean: name => name === 'mention_everyone'
+        },
+        channel: harness.destination
+    });
+    await harness.flow.start(start);
+    const modalId = start.modal.toJSON().custom_id;
+    const sessionId = modalId.split(':')[2];
+    const submit = createInteraction({
+        customId: modalId,
+        fields: {
+            getTextInputValue: field => field === 'title' ? 'Server update' : '@everyone @here <@67890123456789012> <@&78901234567890123>'
+        }
+    });
+    await harness.flow.handleModal(submit);
+    assert.match(submit.replyPayload.content, /@everyone will be mentioned/);
+    assert.equal(harness.sentMessages.length, 0);
+
+    const firstSend = createInteraction({ customId: `announcement:send:${sessionId}:1` });
+    await harness.flow.handleButton(firstSend);
+    assert.match(firstSend.updatePayload.content, /Final confirmation required/);
+    assert.equal(firstSend.updatePayload.components[0].toJSON().components[0].label, 'Confirm @everyone');
+    assert.deepEqual(firstSend.updatePayload.allowedMentions, { parse: [] });
+    assert.equal(harness.sentMessages.length, 0);
+
+    const edit = createInteraction({ customId: `announcement:edit:${sessionId}:1` });
+    await harness.flow.handleButton(edit);
+    const revised = createInteraction({
+        customId: edit.modal.toJSON().custom_id,
+        fields: {
+            getTextInputValue: field => field === 'title' ? 'Server update' : 'Revised @everyone @here <@67890123456789012> <@&78901234567890123>'
+        }
+    });
+    await harness.flow.handleModal(revised);
+    assert.equal(harness.sentMessages.length, 0);
+
+    const secondSend = createInteraction({ customId: `announcement:send:${sessionId}:2` });
+    await harness.flow.handleButton(secondSend);
+    assert.equal(harness.sentMessages.length, 0);
+
+    const confirm = createInteraction({ customId: `announcement:confirm-everyone:${sessionId}:2` });
+    await harness.flow.handleButton(confirm);
+    assert.equal(harness.sentMessages.length, 1);
+    assert.equal(harness.sentMessages[0].content, '@everyone');
+    assert.deepEqual(harness.sentMessages[0].allowedMentions, {
+        parse: ['everyone'],
+        users: [],
+        roles: []
+    });
+    assert.match(harness.sentMessages[0].embeds[0].description, /<@&78901234567890123>/);
+    assert.equal(harness.loggedEvents[0][1].mentionEveryone, true);
+});
+
+test('everyone announcement requires owner and bot mention permissions', async () => {
+    const noOwnerPermission = createHarness();
+    const ownerDenied = createInteraction({
+        options: {
+            getChannel: () => null,
+            getBoolean: () => true
+        },
+        channel: noOwnerPermission.destination,
+        memberPermissions: { has: () => false }
+    });
+    await noOwnerPermission.flow.start(ownerDenied);
+    assert.match(ownerDenied.replyPayload.content, /You need Mention Everyone permission/);
+    assert.equal(ownerDenied.modal, undefined);
+
+    const noBotPermission = createHarness({ botCanMentionEveryone: false });
+    const botDenied = createInteraction({
+        options: {
+            getChannel: () => null,
+            getBoolean: () => true
+        },
+        channel: noBotPermission.destination
+    });
+    await noBotPermission.flow.start(botDenied);
+    assert.match(botDenied.replyPayload.content, /Silena needs Mention Everyone permission/);
+    assert.equal(botDenied.modal, undefined);
 });
