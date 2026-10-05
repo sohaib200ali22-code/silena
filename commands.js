@@ -4,14 +4,36 @@ function createCommandDefinitions() {
     return [
         new SlashCommandBuilder()
             .setName('clear')
-            .setDescription('Delete up to 100 recent messages from this channel')
+            .setDescription('Delete recent messages from this channel, optionally from one user')
             .addIntegerOption(option =>
                 option.setName('amount')
-                    .setDescription('Number of messages to delete (1-100)')
-                    .setRequired(true)
+                    .setDescription('Messages to delete (1-100 normally, up to 1000 with a user filter)')
                     .setMinValue(1)
-                    .setMaxValue(100))
+                    .setMaxValue(1000))
+            .addUserOption(option =>
+                option.setName('user')
+                    .setDescription('Only delete this user’s messages (scan up to 1000 recent messages)'))
+            .addStringOption(option =>
+                option.setName('reason')
+                    .setDescription('Reason for deleting messages')
+                    .setMaxLength(500))
             .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
+        new SlashCommandBuilder()
+            .setName('lock')
+            .setDescription('Prevent @everyone from sending messages in this channel')
+            .addStringOption(option =>
+                option.setName('reason')
+                    .setDescription('Reason for locking the channel')
+                    .setMaxLength(500))
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+        new SlashCommandBuilder()
+            .setName('unlock')
+            .setDescription('Restore the @everyone send-message setting inherited by this channel')
+            .addStringOption(option =>
+                option.setName('reason')
+                    .setDescription('Reason for unlocking the channel')
+                    .setMaxLength(500))
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
         new SlashCommandBuilder()
             .setName('timeout')
             .setDescription('Temporarily timeout a server member')
