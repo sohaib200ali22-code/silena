@@ -10,6 +10,7 @@ const {
 const { readConfig } = require('./config');
 const { createSpamTracker, getAutomodViolation } = require('./automod');
 const { createHealthServer } = require('./health-server');
+const { registerGuildCommands } = require('./register-commands');
 
 const config = readConfig(process.env);
 const client = new Client({
@@ -51,15 +52,32 @@ async function leaveUnconfiguredGuild(guild) {
     }
 }
 
-client.once(Events.ClientReady, readyClient => {
+client.once(Events.ClientReady, async readyClient => {
     logEvent('ready', { bot: readyClient.user.tag, guildId: config.guildId });
     for (const guild of readyClient.guilds.cache.values()) {
         leaveUnconfiguredGuild(guild);
     }
-    readyClient.guilds.fetch(config.guildId).then(
-        guild => logEvent('configured_guild_ready', { guildId: guild.id, name: guild.name }),
-        error => reportError(`Unable to access configured guild ${config.guildId}`, error)
-    );
+
+    try {
+        const result = await registerGuildCommands(config);
+        logEvent('slash_commands_registered', {
+            guildId: result.guildId,
+            commandCount: result.count
+        });
+    } catch (error) {
+        logEvent('slash_command_registration_failed', {
+            guildId: config.guildId,
+            error: error.message
+        });
+        reportError(`Failed to register slash commands for guild ${config.guildId}`, error);
+    }
+
+    try {
+        const guild = await readyClient.guilds.fetch(config.guildId);
+        logEvent('configured_guild_ready', { guildId: guild.id, name: guild.name });
+    } catch (error) {
+        reportError(`Unable to access configured guild ${config.guildId}`, error);
+    }
 });
 
 client.on(Events.GuildCreate, guild => {
