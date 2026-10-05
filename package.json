@@ -3,8 +3,13 @@
   "version": "1.0.0",
   "description": "Private Discord bot for moderation and administration",
   "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "start": "node deploy-commands.js && node index.js"
+    "start": "node index.js",
+    "deploy:commands": "node deploy-commands.js",
+    "test": "node --test"
   },
   "dependencies": {
     "discord.js": "^14.14.1",

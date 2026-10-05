@@ -1,0 +1,23 @@
+services:
+  - type: worker
+    name: silena
+    runtime: node
+    buildCommand: npm ci
+    startCommand: npm start
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: CLIENT_ID
+        sync: false
+      - key: GUILD_ID
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: BLOCK_INVITES
+        value: "true"
+      - key: BLOCK_LINKS
+        value: "false"
+      - key: SPAM_MAX_MESSAGES
+        value: "5"
+      - key: SPAM_WINDOW_SECONDS
+        value: "8"
