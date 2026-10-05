@@ -35,16 +35,15 @@ Automod removes configured invite links, `@everyone`/`@here` and messages with m
 ```sh
 npm install
 npm test
-npm run deploy:commands
 npm start
 ```
 
-Register commands after setting all four required environment variables. `deploy:commands` updates only the configured guild's command set. Keep the bot token private and do not run multiple bot instances with the same configuration unless you intend them to share the same gateway connection.
+On Discord client startup, Silena registers its slash commands to the configured guild and logs the number registered. `npm run deploy:commands` is also available for manual registration and updates only that guild's command set. Keep the bot token private and do not run multiple bot instances with the same configuration unless you intend them to share the same gateway connection.
 
 ## Render
 
-The included `render.yaml` defines Silena as a long-running Node background worker. Create or update the service from the Blueprint and set `DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, and `OWNER_ID` in Render's environment settings; the Blueprint deliberately does not contain secret values. Set optional automod variables there if you want different defaults. Render runs `npm ci` to build and `npm start` to launch the bot.
+The included `render.yaml` defines Silena as a long-running Node background worker. Create or update the service from the Blueprint and set `DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, and `OWNER_ID` in Render's environment settings; the Blueprint deliberately does not contain secret values. Set optional automod variables there if you want different defaults. Render runs `npm ci` to build and `npm start` to launch the bot. Once Discord login succeeds, Silena registers slash commands in `GUILD_ID`; confirm logs show `slash_commands_registered` with the expected command count.
 
 Silena also starts an Express health endpoint at `GET /health` on `0.0.0.0:$PORT` (default port `10000`). It returns HTTP 200 when the Discord client is connected and 503 while it is starting. Render background workers do not expose inbound HTTP traffic or use web-service health checks, so this endpoint is not required for the current worker deployment; it is available if you later run Silena as a Render Web Service. An HTTP listener failure is logged but does not prevent Discord login.
 
-Register slash commands separately with `npm run deploy:commands` from a trusted machine configured with the same environment variables, or through an appropriately configured one-off environment. Do not deploy or paste the token into source files or logs.
+If registration fails, inspect Render logs for `slash_command_registration_failed` and verify that `DISCORD_TOKEN`, `CLIENT_ID`, and `GUILD_ID` all refer to the same Discord application/server setup and that the bot is installed in that guild with the `applications.commands` scope. Do not deploy or paste the token into source files or logs.
