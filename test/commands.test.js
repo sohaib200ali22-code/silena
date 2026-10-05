@@ -9,8 +9,6 @@ test('defines moderation commands with permission defaults and bounded options',
         'lock',
         'unlock',
         'slowmode',
-        'ticket',
-        'close',
         'ticket-panel',
         'announcement',
         'serverinfo',
@@ -22,8 +20,7 @@ test('defines moderation commands with permission defaults and bounded options',
         'kick',
         'ban'
     ]);
-    assert.ok(commands.filter(command => !['ticket', 'close'].includes(command.name))
-        .every(command => command.default_member_permissions));
+    assert.ok(commands.every(command => command.default_member_permissions));
     const clear = commands.find(command => command.name === 'clear');
     assert.equal(clear.options[0].max_value, 1000);
     assert.equal(clear.options[0].required, false);
@@ -38,8 +35,6 @@ test('defines moderation commands with permission defaults and bounded options',
     assert.equal(slowmode.options[0].max_value, 21600);
     assert.equal(slowmode.default_member_permissions, '16');
     assert.equal(clear.options[2].name, 'reason');
-    assert.equal(commands.find(command => command.name === 'ticket').options[0].required, true);
-    assert.equal(commands.find(command => command.name === 'close').options[0].required, true);
     assert.equal(commands.find(command => command.name === 'ticket-panel').default_member_permissions, '32');
     const announcement = commands.find(command => command.name === 'announcement');
     assert.deepEqual(announcement.options.map(option => option.name), ['mention_everyone', 'channel']);

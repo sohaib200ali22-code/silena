@@ -49,22 +49,6 @@ function createCommandDefinitions() {
                     .setMaxLength(500))
             .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
         new SlashCommandBuilder()
-            .setName('ticket')
-            .setDescription('Open a private support ticket')
-            .addStringOption(option =>
-                option.setName('subject')
-                    .setDescription('Briefly describe what you need help with')
-                    .setRequired(true)
-                    .setMaxLength(100)),
-        new SlashCommandBuilder()
-            .setName('close')
-            .setDescription('Close and archive this ticket')
-            .addStringOption(option =>
-                option.setName('reason')
-                    .setDescription('Required reason for closing this ticket')
-                    .setRequired(true)
-                    .setMaxLength(500)),
-        new SlashCommandBuilder()
             .setName('ticket-panel')
             .setDescription('Post the Silena ticket creation panel in this channel')
             .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),

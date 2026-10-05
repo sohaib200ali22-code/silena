@@ -17,7 +17,7 @@ const opener = {
 const staffRole = { id: '45678901234567890', mentionable: true };
 
 function createGuild(overrides = {}) {
-    const calls = { createdOptions: null, notification: null, deleted: false };
+    const calls = { createdOptions: null, notifications: [], deleted: false };
     const channel = {
         id: '56789012345678901',
         name: 'ticket-help-ticket-user-6789',
@@ -25,7 +25,7 @@ function createGuild(overrides = {}) {
         topic: `silena-ticket:v1:open:${opener.id}`,
         messages: { async fetch() { return new Map(); } },
         async send(message) {
-            calls.notification = message;
+            calls.notifications.push(message);
         },
         async delete() {
             calls.deleted = true;
@@ -67,11 +67,16 @@ test('creates a private ticket and only allows the configured staff role ping', 
         '67890123456789012'
     ]);
     assert.ok(calls.createdOptions.permissionOverwrites[0].deny.includes(PermissionFlagsBits.ViewChannel));
-    assert.deepEqual(calls.notification.allowedMentions, {
+    assert.deepEqual(calls.notifications[0].allowedMentions, {
         parse: [],
         roles: [staffRole.id]
     });
-    assert.match(calls.notification.content, new RegExp(`<@&${staffRole.id}>`));
+    assert.match(calls.notifications[0].content, new RegExp(`<@&${staffRole.id}>`));
+    assert.equal(
+        calls.notifications[1].components[0].toJSON().components[0].custom_id,
+        'ticket:close'
+    );
+    assert.match(calls.notifications[1].content, /reason/i);
     assert.equal(parseTicketTopic(channel.topic).openerId, opener.id);
 });
 

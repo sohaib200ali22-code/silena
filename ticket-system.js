@@ -1,4 +1,10 @@
-const { ChannelType, PermissionFlagsBits } = require('discord.js');
+const {
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    ChannelType,
+    PermissionFlagsBits
+} = require('discord.js');
 const { archiveTicketTranscript } = require('./ticket-transcript');
 
 const TICKET_TOPIC_PREFIX = 'silena-ticket:v1';
@@ -102,6 +108,17 @@ async function createPrivateTicket({ guild, opener, staffRoleId, botUserId, subj
                 parse: [],
                 roles: [staffRole.id]
             }
+        });
+        const closeButton = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('ticket:close')
+                .setLabel('Close ticket')
+                .setStyle(ButtonStyle.Danger)
+        );
+        await created.send({
+            content: 'Use the button below to close this ticket. You will be asked for a reason, then Silena will archive the transcript before deleting this channel.',
+            components: [closeButton],
+            allowedMentions: { parse: [] }
         });
     } catch (error) {
         try {

@@ -3,6 +3,7 @@ const test = require('node:test');
 const { PermissionFlagsBits } = require('discord.js');
 const {
     ACCOUNT_AGE_LIMIT_MS,
+    CONFIRMATION_STEPS,
     CONFIRMATION_TTL_MS,
     createSilenaGuard,
     isAccountYoungerThanLimit
@@ -87,6 +88,7 @@ async function confirmThreeTimes(harness) {
 }
 
 test('requires three distinct confirmations before enabling guard protections', async () => {
+    assert.match(CONFIRMATION_STEPS[1].text, /1-hour timeout/);
     const harness = createHarness();
     await confirmThreeTimes(harness);
     assert.equal(harness.events.filter(([name]) => name === 'silena_guard_enabled').length, 1);
@@ -100,7 +102,7 @@ test('confirmation steps are owner-only, sequential, single-use, and expire', as
     const sessionId = step1.split(':')[2];
     assert.equal(harness.timers[0].delay, CONFIRMATION_TTL_MS);
 
-    const outOfOrder = makeInteraction({ customId: step1.replace(':1', ':2') });
+    const outOfOrder = makeInteraction({ customId: step1.replace(/:1$/, ':2') });
     assert.match(step1, /^silena-guard:confirm:[0-9a-f-]{36}:1$/);
     assert.match(outOfOrder.customId, /^silena-guard:confirm:[0-9a-f-]{36}:2$/);
     await harness.guard.handleButton(outOfOrder);
