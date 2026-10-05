@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { notifyModerationTarget } = require('../moderation-notifications');
+const { BAN_NOTICE_MARKER } = require('../appeal-system');
 
 test('sends a mention-safe DM identifying a moderation action and reason', async () => {
     let payload;
@@ -53,4 +54,20 @@ test('reports DM failures without throwing into the moderation action', async ()
     assert.equal(sent, false);
     assert.equal(errors.length, 1);
     assert.equal(events[0][0], 'moderation_dm_failed');
+});
+
+test('ban notice invites the user to reply and marks the message for appeal handling', async () => {
+    let payload;
+    await notifyModerationTarget({
+        user: { send: async message => { payload = message; } },
+        guildId: '23456789012345678',
+        guildName: 'Test Server',
+        action: 'ban',
+        reason: 'Repeated abuse',
+        logEvent: () => {},
+        reportError: () => assert.fail('unexpected DM error')
+    });
+
+    assert.match(payload.embeds[0].data.description, /reply to this message/i);
+    assert.equal(payload.embeds[0].data.footer.text, BAN_NOTICE_MARKER);
 });

@@ -9,6 +9,7 @@ const {
     EmbedBuilder,
     Events,
     GatewayIntentBits,
+    Partials,
     PermissionFlagsBits
 } = require('discord.js');
 const { randomUUID } = require('node:crypto');
@@ -22,6 +23,9 @@ const { createAnnouncementFlow } = require('./announcement-flow');
 const { createTicketPanelFlow } = require('./ticket-panel-flow');
 const { notifyModerationTarget } = require('./moderation-notifications');
 const { createTicketReminderService } = require('./ticket-reminders');
+const { createSilenaGuard } = require('./silena-guard');
+const { createMessageAuditLogger } = require('./message-audit-logger');
+const { createAppealService } = require('./appeal-system');
 const {
     canCloseTicket,
     closePrivateTicket,
@@ -34,9 +38,12 @@ const config = readConfig(process.env);
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
-    ]
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages
+    ],
+    partials: [Partials.Channel]
 });
 const spamTracker = createSpamTracker({
     limit: config.spamMaxMessages,
@@ -52,7 +59,9 @@ const commandPermissions = {
     announcement: PermissionFlagsBits.ManageGuild,
     serverinfo: PermissionFlagsBits.ManageGuild,
     userinfo: PermissionFlagsBits.ManageGuild,
+    silena: PermissionFlagsBits.ManageGuild,
     timeout: PermissionFlagsBits.ModerateMembers,
+    untimeout: PermissionFlagsBits.ModerateMembers,
     warn: PermissionFlagsBits.ModerateMembers,
     kick: PermissionFlagsBits.KickMembers,
     ban: PermissionFlagsBits.BanMembers
@@ -65,6 +74,7 @@ const botCommandPermissions = {
     slowmode: PermissionFlagsBits.ManageChannels,
     'ticket-panel': PermissionFlagsBits.SendMessages | PermissionFlagsBits.EmbedLinks,
     timeout: PermissionFlagsBits.ModerateMembers,
+    untimeout: PermissionFlagsBits.ModerateMembers,
     kick: PermissionFlagsBits.KickMembers,
     ban: PermissionFlagsBits.BanMembers
 };
@@ -90,6 +100,26 @@ const ticketReminders = createTicketReminderService({
     guildId: config.guildId,
     staffRoleId: config.staffRoleId,
     ownerId: config.ownerId,
+    logEvent,
+    reportError
+});
+const silenaGuard = createSilenaGuard({
+    client,
+    config,
+    logEvent,
+    reportError,
+    notifyModerationTarget
+});
+const messageAuditLogger = createMessageAuditLogger({
+    client,
+    logsChannelId: config.logsChannelId,
+    configuredGuildId: config.guildId,
+    logEvent,
+    reportError
+});
+const appealService = createAppealService({
+    client,
+    config,
     logEvent,
     reportError
 });
@@ -294,6 +324,7 @@ client.on(Events.GuildCreate, guild => {
 
 async function handleAutomod(message) {
     if (
+        !silenaGuard.isEnabled() ||
         !message.guild ||
         message.guild.id !== config.guildId ||
         message.author.bot ||
@@ -341,8 +372,38 @@ async function handleAutomod(message) {
 }
 
 client.on(Events.MessageCreate, message => {
+    if (!message.guildId) {
+        appealService.handleMessage(message).catch(error => {
+            reportError(`Ban appeal DM handler failed for message ${message.id}`, error);
+        });
+        return;
+    }
     ticketReminders.handleMessage(message);
     handleAutomod(message).catch(error => reportError('Automod handler failed', error));
+});
+
+client.on(Events.MessageDelete, message => {
+    messageAuditLogger.handleDelete(message).catch(error => {
+        reportError(`Message deletion audit failed for ${message.id}`, error);
+    });
+});
+
+client.on(Events.MessageBulkDelete, messages => {
+    messageAuditLogger.handleBulkDelete(messages).catch(error => {
+        reportError('Bulk message deletion audit failed', error);
+    });
+});
+
+client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
+    messageAuditLogger.handleUpdate(oldMessage, newMessage).catch(error => {
+        reportError(`Message edit audit failed for ${newMessage.id}`, error);
+    });
+});
+
+client.on(Events.GuildMemberAdd, member => {
+    silenaGuard.handleMemberJoin(member).catch(error => {
+        reportError(`Silena Guard join handler failed for member ${member.id}`, error);
+    });
 });
 
 async function handleCommand(interaction) {
@@ -385,6 +446,10 @@ async function dispatchCommand(interaction) {
             reason: 'not_bot_owner'
         });
         return interaction.reply({ content: 'Only the configured bot owner can use Silena commands.', ephemeral: true });
+    }
+
+    if (interaction.commandName === 'silena') {
+        return silenaGuard.handleCommand(interaction);
     }
 
     const requiredPermission = commandPermissions[interaction.commandName];
@@ -499,7 +564,7 @@ async function dispatchCommand(interaction) {
         });
     }
 
-    if (['timeout', 'warn', 'kick', 'ban'].includes(commandName)) {
+    if (['timeout', 'untimeout', 'warn', 'kick', 'ban'].includes(commandName)) {
         targetUser = options.getUser('target');
         if (
             targetUser.id === config.ownerId ||
@@ -584,6 +649,39 @@ async function dispatchCommand(interaction) {
             )
             .setTimestamp();
         return interaction.reply({ embeds: [embed] });
+    }
+
+    if (commandName === 'untimeout') {
+        if (!targetMember) return interaction.reply({ content: 'That user is not a member of this server.', ephemeral: true });
+        if (!targetMember.communicationDisabledUntilTimestamp) {
+            return interaction.reply({ content: 'That user is not currently timed out.', ephemeral: true });
+        }
+        if (!targetMember.moderatable) {
+            return interaction.reply({ content: 'I cannot remove this timeout due to role hierarchy.', ephemeral: true });
+        }
+
+        await targetMember.timeout(null, reason);
+        const dmSent = await notifyModerationTarget({
+            user: targetUser,
+            guildId: guild.id,
+            guildName: guild.name,
+            action: 'timeout removed',
+            reason,
+            logEvent,
+            reportError
+        });
+        logEvent('moderation_action', {
+            guildId: guild.id,
+            actorId: interaction.user.id,
+            targetId: targetUser.id,
+            command: commandName,
+            dmSent,
+            reason
+        });
+        return interaction.reply({
+            content: `Timeout removed for **${targetUser.tag}**. DM notice ${dmSent ? 'sent' : 'could not be delivered'}.`,
+            ephemeral: true
+        });
     }
 
     if (commandName === 'warn') {
@@ -845,6 +943,30 @@ function createSilenaEmbed(title, description) {
 
 client.on(Events.InteractionCreate, interaction => {
     if (interaction.isButton()) {
+        if (interaction.customId.startsWith('appeal:')) {
+            appealService.handleButton(interaction).catch(async error => {
+                reportError('Ban appeal review action failed', error);
+                if (!interaction.deferred && !interaction.replied) {
+                    await interaction.reply({
+                        content: 'Could not process this appeal decision. Check the bot logs.',
+                        ephemeral: true
+                    }).catch(replyError => reportError('Unable to report appeal review failure', replyError));
+                }
+            });
+            return;
+        }
+        if (interaction.customId.startsWith('silena-guard:')) {
+            silenaGuard.handleButton(interaction).catch(async error => {
+                reportError('Silena Guard confirmation failed', error);
+                if (!interaction.deferred && !interaction.replied) {
+                    await interaction.reply({
+                        content: 'Could not process this Silena Guard confirmation. Check the bot logs.',
+                        ephemeral: true
+                    }).catch(replyError => reportError('Unable to report Silena Guard confirmation failure', replyError));
+                }
+            });
+            return;
+        }
         if (interaction.customId.startsWith('announcement:')) {
             announcementFlow.handleButton(interaction).catch(async error => {
                 reportError('Announcement action failed', error);

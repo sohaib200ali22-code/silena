@@ -92,6 +92,19 @@ function createCommandDefinitions() {
                     .setRequired(true))
             .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
         new SlashCommandBuilder()
+            .setName('silena')
+            .setDescription('Enable, disable, or check Silena Guard')
+            .addSubcommand(option =>
+                option.setName('enable')
+                    .setDescription('Enable Guard after three separate confirmations'))
+            .addSubcommand(option =>
+                option.setName('status')
+                    .setDescription('Check whether Guard is enabled'))
+            .addSubcommand(option =>
+                option.setName('disable')
+                    .setDescription('Disable Guard protections'))
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+        new SlashCommandBuilder()
             .setName('timeout')
             .setDescription('Temporarily timeout a server member')
             .addUserOption(option =>
@@ -107,6 +120,18 @@ function createCommandDefinitions() {
             .addStringOption(option =>
                 option.setName('reason')
                     .setDescription('Reason for the timeout')
+                    .setMaxLength(500))
+            .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+        new SlashCommandBuilder()
+            .setName('untimeout')
+            .setDescription('Remove an active timeout from a server member')
+            .addUserOption(option =>
+                option.setName('target')
+                    .setDescription('The member to remove the timeout from')
+                    .setRequired(true))
+            .addStringOption(option =>
+                option.setName('reason')
+                    .setDescription('Reason for removing the timeout')
                     .setMaxLength(500))
             .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
         new SlashCommandBuilder()
