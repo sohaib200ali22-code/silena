@@ -1,16 +1,29 @@
 require('dotenv').config();
 
 const {
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
     Client,
     EmbedBuilder,
     Events,
     GatewayIntentBits,
     PermissionFlagsBits
 } = require('discord.js');
+const { randomUUID } = require('node:crypto');
 const { readConfig } = require('./config');
 const { createSpamTracker, getAutomodViolation } = require('./automod');
 const { createHealthServer } = require('./health-server');
 const { registerGuildCommands } = require('./register-commands');
+const { setChannelLocked } = require('./channel-lock');
+const { deleteUserMessages, scanRecentMessages } = require('./purge-user-messages');
+const {
+    canCloseTicket,
+    closePrivateTicket,
+    createPrivateTicket,
+    findOpenTicket,
+    parseTicketTopic
+} = require('./ticket-system');
 
 const config = readConfig(process.env);
 const client = new Client({
@@ -27,11 +40,24 @@ const spamTracker = createSpamTracker({
 
 const commandPermissions = {
     clear: PermissionFlagsBits.ManageMessages,
+    lock: PermissionFlagsBits.ManageChannels,
+    unlock: PermissionFlagsBits.ManageChannels,
     timeout: PermissionFlagsBits.ModerateMembers,
     warn: PermissionFlagsBits.ModerateMembers,
     kick: PermissionFlagsBits.KickMembers,
     ban: PermissionFlagsBits.BanMembers
 };
+
+const botCommandPermissions = {
+    clear: PermissionFlagsBits.ManageMessages,
+    lock: PermissionFlagsBits.ManageChannels,
+    unlock: PermissionFlagsBits.ManageChannels,
+    timeout: PermissionFlagsBits.ModerateMembers,
+    kick: PermissionFlagsBits.KickMembers,
+    ban: PermissionFlagsBits.BanMembers
+};
+const pendingUserPurges = new Map();
+const openingTickets = new Set();
 
 function logEvent(type, details) {
     console.info(JSON.stringify({ type, at: new Date().toISOString(), ...details }));
@@ -39,6 +65,152 @@ function logEvent(type, details) {
 
 function reportError(context, error) {
     console.error(`${context}:`, error);
+}
+
+function clearUserPurgeSession(sessionId) {
+    const session = pendingUserPurges.get(sessionId);
+    if (!session) return;
+    clearTimeout(session.expiryTimer);
+    pendingUserPurges.delete(sessionId);
+}
+
+async function prepareUserPurge(interaction, targetUser, maxDeletes, reason) {
+    const channel = interaction.channel;
+    if (!channel?.messages?.fetch || !channel.bulkDelete) {
+        return interaction.reply({ content: 'This command requires a channel with message history and bulk-delete support.', ephemeral: true });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    try {
+        const messages = await scanRecentMessages(channel);
+        const matching = messages.filter(message => message.author.id === targetUser.id).length;
+        if (matching === 0) {
+            logEvent('user_message_purge_no_matches', {
+                guildId: interaction.guildId,
+                channelId: interaction.channelId,
+                actorId: interaction.user.id,
+                targetId: targetUser.id,
+                scanned: messages.length
+            });
+            return interaction.editReply(`Scanned ${messages.length} recent messages; none were from ${targetUser.tag}.`);
+        }
+
+        const sessionId = randomUUID();
+        const expiryTimer = setTimeout(() => clearUserPurgeSession(sessionId), 2 * 60 * 1000);
+        expiryTimer.unref?.();
+        pendingUserPurges.set(sessionId, {
+            messages,
+            maxDeletes,
+            reason,
+            targetId: targetUser.id,
+            targetName: targetUser.tag,
+            ownerId: interaction.user.id,
+            guildId: interaction.guildId,
+            channelId: interaction.channelId,
+            expiryTimer
+        });
+        logEvent('user_message_purge_confirmation_requested', {
+            guildId: interaction.guildId,
+            channelId: interaction.channelId,
+            actorId: interaction.user.id,
+            targetId: targetUser.id,
+            scanned: messages.length,
+            matching,
+            maxDeletes
+        });
+
+        const buttons = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`purge-user:${sessionId}:confirm`)
+                .setLabel('Delete matches')
+                .setStyle(ButtonStyle.Danger),
+            new ButtonBuilder()
+                .setCustomId(`purge-user:${sessionId}:cancel`)
+                .setLabel('Cancel')
+                .setStyle(ButtonStyle.Secondary)
+        );
+        return interaction.editReply({
+            content: `Scanned ${messages.length} recent messages in this channel and found ${matching} from ${targetUser.tag}. Up to ${Math.min(matching, maxDeletes)} will be deleted; messages older than 14 days will be deleted individually. Continue?`,
+            components: [buttons]
+        });
+    } catch (error) {
+        reportError('Unable to prepare user message purge', error);
+        return interaction.editReply('Could not scan this channel’s message history. No messages were deleted.');
+    }
+}
+
+async function handleUserPurgeButton(interaction) {
+    const match = /^purge-user:([0-9a-f-]+):(confirm|cancel)$/.exec(interaction.customId);
+    if (!match) return false;
+
+    const [, sessionId, action] = match;
+    const session = pendingUserPurges.get(sessionId);
+    if (!session) {
+        await interaction.reply({ content: 'This confirmation has expired. Run /clear again if needed.', ephemeral: true });
+        return true;
+    }
+    if (
+        interaction.user.id !== session.ownerId ||
+        interaction.user.id !== config.ownerId ||
+        interaction.guildId !== session.guildId ||
+        interaction.channelId !== session.channelId
+    ) {
+        await interaction.reply({ content: 'This confirmation is only available to the bot owner in the original channel.', ephemeral: true });
+        return true;
+    }
+    if (
+        !interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages) ||
+        !interaction.appPermissions?.has(PermissionFlagsBits.ManageMessages)
+    ) {
+        await interaction.reply({
+            content: 'The required Manage Messages permission is no longer available; no messages were deleted.',
+            ephemeral: true
+        });
+        clearUserPurgeSession(sessionId);
+        return true;
+    }
+
+    clearUserPurgeSession(sessionId);
+    await interaction.deferUpdate();
+    if (action === 'cancel') {
+        await interaction.editReply({ content: 'User message deletion cancelled. No messages were deleted.', components: [] });
+        return true;
+    }
+
+    const channel = interaction.channel;
+    const result = await deleteUserMessages(
+        channel,
+        session.messages,
+        session.targetId,
+        session.maxDeletes,
+        { reason: session.reason }
+    );
+    logEvent('user_message_purge_completed', {
+        guildId: session.guildId,
+        channelId: session.channelId,
+        actorId: session.ownerId,
+        targetId: session.targetId,
+        reason: session.reason,
+        scanned: result.scanned,
+        matching: result.matching,
+        selected: result.selected,
+        deleted: result.deleted,
+        skipped: result.skipped,
+        failed: result.failed
+    });
+    for (const failure of result.failures.slice(0, 10)) {
+        reportError(
+            `User message purge had ${failure.count} failure(s)${failure.messageId ? ` for message ${failure.messageId}` : ''}`,
+            new Error(failure.message)
+        );
+    }
+
+    await interaction.editReply({
+        content: `User message purge for ${session.targetName} finished: scanned ${result.scanned}, matched ${result.matching}, deleted ${result.deleted}, skipped ${result.skipped} (not selected or not matching), failed ${result.failed}.`,
+        components: []
+    });
+    return true;
 }
 
 async function leaveUnconfiguredGuild(guild) {
@@ -143,6 +315,13 @@ async function handleCommand(interaction) {
         return interaction.reply({ content: 'This command is only available in the configured server.', ephemeral: true });
     }
 
+    if (interaction.commandName === 'ticket') {
+        return handleTicketOpen(interaction);
+    }
+    if (interaction.commandName === 'close') {
+        return handleTicketClose(interaction);
+    }
+
     if (interaction.user.id !== config.ownerId) {
         logEvent('command_denied', {
             guildId: interaction.guildId,
@@ -162,15 +341,7 @@ async function handleCommand(interaction) {
         return interaction.reply({ content: 'You lack the server permission required for this command.', ephemeral: true });
     }
 
-    const requiredBotPermission = interaction.commandName === 'warn'
-        ? null
-        : interaction.commandName === 'clear'
-            ? PermissionFlagsBits.ManageMessages
-            : interaction.commandName === 'timeout'
-                ? PermissionFlagsBits.ModerateMembers
-                : interaction.commandName === 'kick'
-                    ? PermissionFlagsBits.KickMembers
-                    : PermissionFlagsBits.BanMembers;
+    const requiredBotPermission = botCommandPermissions[interaction.commandName];
     if (requiredBotPermission && !interaction.appPermissions.has(requiredBotPermission)) {
         return interaction.reply({ content: 'Silena lacks the server permission required for this command.', ephemeral: true });
     }
@@ -179,6 +350,29 @@ async function handleCommand(interaction) {
     const reason = options.getString('reason') || 'No reason provided';
     let targetUser;
     let targetMember;
+
+    if (commandName === 'lock' || commandName === 'unlock') {
+        if (!interaction.channel) {
+            return interaction.reply({ content: 'This command requires a channel.', ephemeral: true });
+        }
+
+        const locked = commandName === 'lock';
+        await setChannelLocked(interaction.channel, locked, reason);
+        logEvent('moderation_action', {
+            guildId: guild.id,
+            channelId: interaction.channelId,
+            actorId: interaction.user.id,
+            command: commandName,
+            reason
+        });
+
+        return interaction.reply({
+            content: locked
+                ? 'This channel is locked for @everyone. Explicit member or role permissions may still allow sending messages.'
+                : 'The @everyone send-message override was removed. This channel follows its category and server permissions again.',
+            ephemeral: true
+        });
+    }
 
     if (['timeout', 'warn', 'kick', 'ban'].includes(commandName)) {
         targetUser = options.getUser('target');
@@ -197,6 +391,19 @@ async function handleCommand(interaction) {
 
     if (commandName === 'clear') {
         const amount = options.getInteger('amount');
+        const targetUser = options.getUser('user');
+        if (targetUser) {
+            if (amount !== null && (!Number.isInteger(amount) || amount < 1 || amount > 1000)) {
+                return interaction.reply({ content: 'The user-filter deletion cap must be between 1 and 1,000.', ephemeral: true });
+            }
+            return prepareUserPurge(interaction, targetUser, amount || 1000, reason);
+        }
+        if (!Number.isInteger(amount) || amount < 1 || amount > 100) {
+            return interaction.reply({
+                content: 'Provide an amount from 1 to 100, or select a user to scan up to 1,000 recent messages.',
+                ephemeral: true
+            });
+        }
         if (!interaction.channel?.isTextBased() || !interaction.channel.bulkDelete) {
             return interaction.reply({ content: 'This command can only be used in a text channel.', ephemeral: true });
         }
@@ -298,7 +505,150 @@ async function handleCommand(interaction) {
     return interaction.reply({ content: 'Unknown command.', ephemeral: true });
 }
 
+async function handleTicketOpen(interaction) {
+    const requiredBotPermissions = PermissionFlagsBits.ManageChannels | PermissionFlagsBits.ManageRoles;
+    if (!interaction.appPermissions?.has(requiredBotPermissions)) {
+        return interaction.reply({
+            content: 'Silena needs Manage Channels and Manage Roles permissions to create private tickets.',
+            ephemeral: true
+        });
+    }
+
+    const key = `${interaction.guildId}:${interaction.user.id}`;
+    if (openingTickets.has(key)) {
+        return interaction.reply({ content: 'Your ticket is already being created. Please wait a moment.', ephemeral: true });
+    }
+    openingTickets.add(key);
+
+    try {
+        await interaction.deferReply({ ephemeral: true });
+        const existing = await findOpenTicket(interaction.guild, interaction.user.id);
+        if (existing) {
+            return interaction.editReply(`You already have an open ticket: <#${existing.id}>.`);
+        }
+        const subject = interaction.options.getString('subject', true).trim();
+        if (!subject) {
+            return interaction.editReply('Please provide a short ticket subject.');
+        }
+
+        const ticket = await createPrivateTicket({
+            guild: interaction.guild,
+            opener: interaction.user,
+            staffRoleId: config.staffRoleId,
+            botUserId: client.user.id,
+            subject
+        });
+        logEvent('ticket_opened', {
+            guildId: interaction.guildId,
+            channelId: ticket.id,
+            openerId: interaction.user.id,
+            staffRoleId: config.staffRoleId,
+            subject
+        });
+        return interaction.editReply(`Your private ticket is ready: <#${ticket.id}>.`);
+    } catch (error) {
+        reportError('Ticket creation failed', error);
+        if (!interaction.deferred && !interaction.replied) {
+            return interaction.reply({ content: `Could not create your ticket: ${error.message}`, ephemeral: true });
+        }
+        if (error.cleanupError) {
+            reportError(`Failed to clean up ticket channel ${error.orphanedChannelId}`, error.cleanupError);
+            return interaction.editReply(
+                `Ticket setup failed because staff could not be notified, and cleanup also failed. Please contact staff; the unnotified channel is <#${error.orphanedChannelId}>.`
+            );
+        }
+        if (error.existingTicketId) {
+            return interaction.editReply(`You already have an open ticket: <#${error.existingTicketId}>.`);
+        }
+        return interaction.editReply(`Could not create your ticket: ${error.message}`);
+    } finally {
+        openingTickets.delete(key);
+    }
+}
+
+async function handleTicketClose(interaction) {
+    const channel = interaction.channel;
+    const ticket = parseTicketTopic(channel?.topic);
+    if (!ticket) {
+        return interaction.reply({ content: '/close can only be used in a Silena ticket channel.', ephemeral: true });
+    }
+
+    let memberRoleIds = [];
+    if (
+        interaction.user.id !== config.ownerId &&
+        interaction.user.id !== ticket.openerId
+    ) {
+        try {
+            const member = await interaction.guild.members.fetch(interaction.user.id);
+            memberRoleIds = [...member.roles.cache.keys()];
+        } catch (error) {
+            reportError('Unable to verify ticket closer roles', error);
+            return interaction.reply({ content: 'Could not verify your staff role. Please try again or contact the bot owner.', ephemeral: true });
+        }
+    }
+
+    if (!canCloseTicket({
+        userId: interaction.user.id,
+        ownerId: config.ownerId,
+        openerId: ticket.openerId,
+        staffRoleId: config.staffRoleId,
+        memberRoleIds
+    })) {
+        return interaction.reply({
+            content: 'Only the ticket opener, configured staff role, or bot owner can close this ticket.',
+            ephemeral: true
+        });
+    }
+
+    const requiredBotPermissions = PermissionFlagsBits.ManageChannels | PermissionFlagsBits.ManageRoles;
+    if (!interaction.appPermissions?.has(requiredBotPermissions) || !interaction.appPermissions.has(PermissionFlagsBits.SendMessages)) {
+        return interaction.reply({
+            content: 'Silena needs Send Messages, Manage Channels, and Manage Roles in this ticket to close it safely.',
+            ephemeral: true
+        });
+    }
+
+    const reason = interaction.options.getString('reason', true).trim();
+    if (!reason) {
+        return interaction.reply({ content: 'A close reason is required.', ephemeral: true });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    try {
+        await closePrivateTicket(channel, {
+            closerId: interaction.user.id,
+            closerTag: interaction.user.tag || interaction.user.username,
+            reason
+        });
+        logEvent('ticket_closed', {
+            guildId: interaction.guildId,
+            channelId: channel.id,
+            openerId: ticket.openerId,
+            closerId: interaction.user.id,
+            reason
+        });
+        return interaction.editReply(`Ticket archived. Reason: ${reason}`);
+    } catch (error) {
+        reportError(`Failed to archive ticket channel ${channel.id}`, error);
+        return interaction.editReply(`Could not fully archive this ticket: ${error.message}. The transcript has not been deleted; check bot permissions and retry.`);
+    }
+}
+
 client.on(Events.InteractionCreate, interaction => {
+    if (interaction.isButton()) {
+        handleUserPurgeButton(interaction).catch(async error => {
+            reportError('User purge confirmation failed', error);
+            if (interaction.deferred || interaction.replied) {
+                await interaction.followUp({ content: 'The deletion operation failed; check bot logs for details.', ephemeral: true })
+                    .catch(replyError => reportError('Unable to report purge failure', replyError));
+            } else {
+                await interaction.reply({ content: 'The deletion operation failed; check bot logs for details.', ephemeral: true })
+                    .catch(replyError => reportError('Unable to report purge failure', replyError));
+            }
+        });
+        return;
+    }
+
     handleCommand(interaction).catch(async error => {
         reportError(`Command ${interaction.commandName || 'unknown'} failed`, error);
         const response = { content: 'The command failed. Check the bot logs for details.', ephemeral: true };

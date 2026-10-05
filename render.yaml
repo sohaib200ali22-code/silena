@@ -13,6 +13,8 @@ services:
         sync: false
       - key: OWNER_ID
         sync: false
+      - key: STAFF_ROLE_ID
+        sync: false
       - key: BLOCK_INVITES
         value: "true"
       - key: BLOCK_LINKS
