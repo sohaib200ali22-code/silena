@@ -13,7 +13,7 @@ Copy `.env.example` to `.env` for local use and fill in the four required values
 | `GUILD_ID` | The one Discord server where Silena is allowed to operate. |
 | `OWNER_ID` | The Discord user ID allowed to run Silena's commands. |
 
-Enable the **Message Content Intent** and **Server Members Intent** for the bot in the Developer Portal. Invite it to the configured server with the `bot` and `applications.commands` OAuth scopes and only the permissions it needs: View Channels, Read Message History, Send Messages, Manage Messages, Moderate Members, Kick Members, and Ban Members. The command runner also checks the caller's corresponding Manage Messages, Moderate Members, Kick Members, or Ban Members permission.
+Enable the **Message Content Intent** for the bot in the Developer Portal so automod can inspect message text. Silena does not request the privileged Server Members Intent; moderation commands fetch individual target members as needed. Invite it to the configured server with the `bot` and `applications.commands` OAuth scopes and only the permissions it needs: View Channels, Read Message History, Send Messages, Manage Messages, Moderate Members, Kick Members, and Ban Members. The command runner also checks the caller's corresponding Manage Messages, Moderate Members, Kick Members, or Ban Members permission.
 
 Configuration is validated on startup and command deployment. Discord IDs must be 17-20 digit IDs. Never commit `.env` or put a real token in source control.
 
