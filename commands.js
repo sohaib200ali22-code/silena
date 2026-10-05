@@ -35,6 +35,20 @@ function createCommandDefinitions() {
                     .setMaxLength(500))
             .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
         new SlashCommandBuilder()
+            .setName('slowmode')
+            .setDescription('Set or disable slowmode in this text channel')
+            .addIntegerOption(option =>
+                option.setName('seconds')
+                    .setDescription('Delay between messages (0 disables slowmode; maximum 21600)')
+                    .setRequired(true)
+                    .setMinValue(0)
+                    .setMaxValue(21600))
+            .addStringOption(option =>
+                option.setName('reason')
+                    .setDescription('Reason for changing slowmode')
+                    .setMaxLength(500))
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+        new SlashCommandBuilder()
             .setName('ticket')
             .setDescription('Open a private support ticket')
             .addStringOption(option =>
@@ -64,6 +78,18 @@ function createCommandDefinitions() {
                 option.setName('channel')
                     .setDescription('Destination channel (defaults to this channel)')
                     .addChannelTypes(ChannelType.GuildText))
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+        new SlashCommandBuilder()
+            .setName('serverinfo')
+            .setDescription('Show information about the configured server')
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+        new SlashCommandBuilder()
+            .setName('userinfo')
+            .setDescription('Show information about a server member')
+            .addUserOption(option =>
+                option.setName('target')
+                    .setDescription('Member to inspect')
+                    .setRequired(true))
             .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
         new SlashCommandBuilder()
             .setName('timeout')

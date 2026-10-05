@@ -8,10 +8,13 @@ test('defines moderation commands with permission defaults and bounded options',
         'clear',
         'lock',
         'unlock',
+        'slowmode',
         'ticket',
         'close',
         'ticket-panel',
         'announcement',
+        'serverinfo',
+        'userinfo',
         'timeout',
         'warn',
         'kick',
@@ -26,6 +29,10 @@ test('defines moderation commands with permission defaults and bounded options',
     assert.equal(commands.find(command => command.name === 'timeout').options[1].max_value, 40320);
     assert.equal(commands.find(command => command.name === 'lock').default_member_permissions, '16');
     assert.equal(commands.find(command => command.name === 'unlock').default_member_permissions, '16');
+    const slowmode = commands.find(command => command.name === 'slowmode');
+    assert.equal(slowmode.options[0].min_value, 0);
+    assert.equal(slowmode.options[0].max_value, 21600);
+    assert.equal(slowmode.default_member_permissions, '16');
     assert.equal(clear.options[2].name, 'reason');
     assert.equal(commands.find(command => command.name === 'ticket').options[0].required, true);
     assert.equal(commands.find(command => command.name === 'close').options[0].required, true);
@@ -35,4 +42,6 @@ test('defines moderation commands with permission defaults and bounded options',
     assert.equal(announcement.options[0].required, false);
     assert.equal(announcement.options[0].type, 5);
     assert.equal(announcement.options[1].required, false);
+    assert.equal(commands.find(command => command.name === 'userinfo').options[0].required, true);
+    assert.ok(commands.find(command => command.name === 'serverinfo').default_member_permissions);
 });
