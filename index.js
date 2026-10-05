@@ -9,6 +9,7 @@ const {
 } = require('discord.js');
 const { readConfig } = require('./config');
 const { createSpamTracker, getAutomodViolation } = require('./automod');
+const { createHealthServer } = require('./health-server');
 
 const config = readConfig(process.env);
 const client = new Client({
@@ -290,6 +291,22 @@ client.on(Events.InteractionCreate, interaction => {
         }
     });
 });
+
+try {
+    const healthServer = createHealthServer({
+        port: process.env.PORT || 10000,
+        isReady: () => client.isReady()
+    });
+    healthServer.on('listening', () => {
+        const address = healthServer.address();
+        logEvent('health_server_ready', {
+            port: typeof address === 'object' && address ? address.port : null
+        });
+    });
+    healthServer.on('error', error => reportError('Health server failed', error));
+} catch (error) {
+    reportError('Health server failed to start', error);
+}
 
 client.login(config.token).catch(error => {
     reportError('Discord login failed', error);
