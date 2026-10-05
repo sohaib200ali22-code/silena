@@ -56,17 +56,7 @@ function createCommandDefinitions() {
             .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
         new SlashCommandBuilder()
             .setName('announcement')
-            .setDescription('Publish a Silena-branded announcement')
-            .addStringOption(option =>
-                option.setName('title')
-                    .setDescription('Announcement title')
-                    .setRequired(true)
-                    .setMaxLength(256))
-            .addStringOption(option =>
-                option.setName('message')
-                    .setDescription('Announcement message')
-                    .setRequired(true)
-                    .setMaxLength(4000))
+            .setDescription('Create and preview a Silena-branded announcement')
             .addChannelOption(option =>
                 option.setName('channel')
                     .setDescription('Destination channel (defaults to this channel)')

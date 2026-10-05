@@ -30,6 +30,7 @@ test('defines moderation commands with permission defaults and bounded options',
     assert.equal(commands.find(command => command.name === 'ticket').options[0].required, true);
     assert.equal(commands.find(command => command.name === 'close').options[0].required, true);
     assert.equal(commands.find(command => command.name === 'ticket-panel').default_member_permissions, '32');
-    assert.equal(commands.find(command => command.name === 'announcement').options[0].required, true);
-    assert.equal(commands.find(command => command.name === 'announcement').options[1].required, true);
+    const announcement = commands.find(command => command.name === 'announcement');
+    assert.deepEqual(announcement.options.map(option => option.name), ['channel']);
+    assert.equal(announcement.options[0].required, false);
 });
