@@ -9,12 +9,15 @@ const {
     EmbedBuilder,
     Events,
     GatewayIntentBits,
+    ModalBuilder,
     Partials,
-    PermissionFlagsBits
+    PermissionFlagsBits,
+    TextInputBuilder,
+    TextInputStyle
 } = require('discord.js');
 const { randomUUID } = require('node:crypto');
 const { readConfig } = require('./config');
-const { createSpamTracker, getAutomodViolation } = require('./automod');
+const { createSpamTracker, enforceSpamBurst, getAutomodViolation } = require('./automod');
 const { createHealthServer } = require('./health-server');
 const { registerGuildCommands } = require('./register-commands');
 const { setChannelLocked } = require('./channel-lock');
@@ -330,24 +333,45 @@ async function handleAutomod(message) {
         message.author.bot ||
         message.webhookId ||
         message.author.id === config.ownerId ||
-        message.member?.permissions.has(PermissionFlagsBits.Administrator)
+        message.member?.permissions.has(PermissionFlagsBits.Administrator) ||
+        (message.member?.communicationDisabledUntilTimestamp && message.member.communicationDisabledUntilTimestamp > Date.now())
     ) {
         return;
     }
 
-    const violation = getAutomodViolation(message.content, {
+    const contentViolation = getAutomodViolation(message.content, {
         blockInvites: config.blockInvites,
         blockLinks: config.blockLinks,
         mentionLimit: 5
-    }) || spamTracker.record(message.guild.id, message.author.id);
+    });
+    const spamViolation = spamTracker.record(message.guild.id, message.author.id, message);
+    const violation = spamViolation?.violation || contentViolation;
 
     if (!violation) return;
 
-    try {
-        await message.delete();
-    } catch (error) {
-        reportError(`Automod could not delete message ${message.id}`, error);
-        return;
+    let spamTimeoutApplied = false;
+    let deletedSpamMessages = 0;
+    let failedSpamDeletes = 0;
+    if (violation === 'spam') {
+        const result = await enforceSpamBurst({
+            messages: spamViolation.messages,
+            member: message.member,
+            guild: message.guild,
+            user: message.author,
+            notifyModerationTarget,
+            logEvent,
+            reportError
+        });
+        spamTimeoutApplied = result.timeoutApplied;
+        deletedSpamMessages = result.deletedMessages;
+        failedSpamDeletes = result.failedDeletes;
+    } else {
+        try {
+            await message.delete();
+        } catch (error) {
+            reportError(`Automod could not delete message ${message.id}`, error);
+            return;
+        }
     }
 
     logEvent('automod_action', {
@@ -355,12 +379,20 @@ async function handleAutomod(message) {
         channelId: message.channel.id,
         userId: message.author.id,
         messageId: message.id,
-        rule: violation
+        rule: violation,
+        ...(violation === 'spam' ? {
+            spamMessagesDetected: spamViolation.messages.length,
+            spamMessagesDeleted: deletedSpamMessages,
+            spamMessageDeleteFailures: failedSpamDeletes,
+            timeoutApplied: spamTimeoutApplied
+        } : {})
     });
 
     try {
         const notice = await message.channel.send({
-            content: `<@${message.author.id}> Your message was removed by Silena's ${violation} rule.`,
+            content: violation === 'spam'
+                ? `<@${message.author.id}> Repeated messages were removed by Silena's anti-spam rule${spamTimeoutApplied ? '; you have been timed out for 1 hour.' : '.'}`
+                : `<@${message.author.id}> Your message was removed by Silena's ${violation} rule.`,
             allowedMentions: { users: [message.author.id] }
         });
         setTimeout(() => {
@@ -429,13 +461,6 @@ async function dispatchCommand(interaction) {
 
     if (!interaction.inGuild() || interaction.guildId !== config.guildId) {
         return interaction.reply({ content: 'This command is only available in the configured server.', ephemeral: true });
-    }
-
-    if (interaction.commandName === 'ticket') {
-        return handleTicketOpen(interaction);
-    }
-    if (interaction.commandName === 'close') {
-        return handleTicketClose(interaction);
     }
 
     if (interaction.user.id !== config.ownerId) {
@@ -771,7 +796,59 @@ async function dispatchCommand(interaction) {
     return interaction.reply({ content: 'Unknown command.', ephemeral: true });
 }
 
+function isPublishedTicketPanel(message) {
+    return Boolean(
+        message?.author?.id === client.user?.id &&
+        message.components?.some(row =>
+            row.components?.some(component => component.customId === 'ticket:create')
+        )
+    );
+}
+
+async function handleTicketCreateButton(interaction) {
+    if (
+        !interaction.inGuild() ||
+        interaction.guildId !== config.guildId ||
+        !isPublishedTicketPanel(interaction.message)
+    ) {
+        return interaction.reply({
+            content: 'Tickets can only be opened from a Silena ticket panel in the configured server.',
+            ephemeral: true
+        });
+    }
+
+    const subject = new TextInputBuilder()
+        .setCustomId('subject')
+        .setLabel('What do you need help with?')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(100);
+    return interaction.showModal(new ModalBuilder()
+        .setCustomId(`ticket:create:modal:${interaction.channelId}:${interaction.message.id}`)
+        .setTitle('Open a support ticket')
+        .addComponents(new ActionRowBuilder().addComponents(subject)));
+}
+
 async function handleTicketOpen(interaction) {
+    const modalMatch = /^ticket:create:modal:(\d{17,20}):(\d{17,20})$/.exec(interaction.customId || '');
+    if (
+        !interaction.isModalSubmit?.() ||
+        !interaction.inGuild() ||
+        interaction.guildId !== config.guildId ||
+        !modalMatch ||
+        modalMatch[1] !== interaction.channelId
+    ) {
+        return interaction.reply({
+            content: 'Tickets can only be opened from a Silena ticket panel in the configured server.',
+            ephemeral: true
+        });
+    }
+    const [, panelChannelId, panelMessageId] = modalMatch;
+    const subject = interaction.fields.getTextInputValue('subject').trim();
+    if (!subject) {
+        return interaction.reply({ content: 'Enter a brief ticket subject.', ephemeral: true });
+    }
+
     const requiredBotPermissions = PermissionFlagsBits.ManageChannels | PermissionFlagsBits.ManageRoles;
     if (!interaction.appPermissions?.has(requiredBotPermissions)) {
         return interaction.reply({
@@ -780,20 +857,24 @@ async function handleTicketOpen(interaction) {
         });
     }
 
+    await interaction.deferReply({ ephemeral: true });
+    const panelChannel = await interaction.guild.channels.fetch(panelChannelId);
+    const panelMessage = await panelChannel?.messages?.fetch(panelMessageId);
+    if (!isPublishedTicketPanel(panelMessage)) {
+        return interaction.editReply('That ticket panel is no longer valid. Use a current Silena ticket panel.');
+    }
+
     const key = `${interaction.guildId}:${interaction.user.id}`;
     if (openingTickets.has(key)) {
-        return interaction.reply({ content: 'Your ticket is already being created. Please wait a moment.', ephemeral: true });
+        return interaction.editReply('Your ticket is already being created. Please wait a moment.');
     }
     openingTickets.add(key);
 
     try {
-        await interaction.deferReply({ ephemeral: true });
         const existing = await findOpenTicket(interaction.guild, interaction.user.id);
         if (existing) {
             return interaction.editReply(`You already have an open ticket: <#${existing.id}>.`);
         }
-        const subject = interaction.options?.getString('subject')?.trim() || 'Support request';
-
         const ticket = await createPrivateTicket({
             guild: interaction.guild,
             opener: interaction.user,
@@ -829,34 +910,74 @@ async function handleTicketOpen(interaction) {
     }
 }
 
-async function handleTicketClose(interaction) {
-    const channel = interaction.channel;
-    const ticket = parseTicketTopic(channel?.topic);
-    if (!ticket) {
-        return interaction.reply({ content: '/close can only be used in a Silena ticket channel.', ephemeral: true });
-    }
-
-    let memberRoleIds = [];
+async function handleTicketCloseButton(interaction) {
+    const ticket = parseTicketTopic(interaction.channel?.topic);
     if (
-        interaction.user.id !== config.ownerId &&
-        interaction.user.id !== ticket.openerId
+        !interaction.inGuild() ||
+        interaction.guildId !== config.guildId ||
+        !ticket ||
+        ticket.status !== 'open' ||
+        interaction.message?.author?.id !== client.user?.id ||
+        !interaction.message.components?.some(row =>
+            row.components?.some(component => component.customId === 'ticket:close')
+        )
     ) {
-        try {
-            const member = await interaction.guild.members.fetch(interaction.user.id);
-            memberRoleIds = [...member.roles.cache.keys()];
-        } catch (error) {
-            reportError('Unable to verify ticket closer roles', error);
-            return interaction.reply({ content: 'Could not verify your staff role. Please try again or contact the bot owner.', ephemeral: true });
-        }
+        return interaction.reply({
+            content: 'Tickets can only be closed from the close button in an open Silena ticket panel.',
+            ephemeral: true
+        });
     }
+    if (!await canUserCloseTicket(interaction, ticket)) {
+        return interaction.reply({
+            content: 'Only the ticket opener, configured staff role, or bot owner can close this ticket.',
+            ephemeral: true
+        });
+    }
+    const reasonInput = new TextInputBuilder()
+        .setCustomId('reason')
+        .setLabel('Reason for closing this ticket')
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(500);
+    return interaction.showModal(new ModalBuilder()
+        .setCustomId(`ticket:close:modal:${interaction.channelId}`)
+        .setTitle('Close and archive ticket')
+        .addComponents(new ActionRowBuilder().addComponents(reasonInput)));
+}
 
-    if (!canCloseTicket({
+async function canUserCloseTicket(interaction, ticket) {
+    const roles = interaction.member?.roles;
+    const memberRoleIds = roles?.cache
+        ? [...roles.cache.keys()]
+        : Array.isArray(roles)
+            ? roles
+            : [];
+    return canCloseTicket({
         userId: interaction.user.id,
         ownerId: config.ownerId,
         openerId: ticket.openerId,
         staffRoleId: config.staffRoleId,
         memberRoleIds
-    })) {
+    });
+}
+
+async function handleTicketClose(interaction) {
+    const channel = interaction.channel;
+    const ticket = parseTicketTopic(channel?.topic);
+    if (
+        !interaction.isModalSubmit?.() ||
+        !interaction.inGuild() ||
+        interaction.guildId !== config.guildId ||
+        !ticket ||
+        ticket.status !== 'open' ||
+        interaction.customId !== `ticket:close:modal:${channel?.id}`
+    ) {
+        return interaction.reply({
+            content: 'Tickets can only be closed from the close button in an open Silena ticket panel.',
+            ephemeral: true
+        });
+    }
+    if (!await canUserCloseTicket(interaction, ticket)) {
         return interaction.reply({
             content: 'Only the ticket opener, configured staff role, or bot owner can close this ticket.',
             ephemeral: true
@@ -878,7 +999,7 @@ async function handleTicketClose(interaction) {
         return interaction.reply({ content: 'This ticket is already being archived. Please wait.', ephemeral: true });
     }
 
-    const reason = interaction.options.getString('reason', true).trim();
+    const reason = interaction.fields.getTextInputValue('reason').trim();
     if (!reason) {
         return interaction.reply({ content: 'A close reason is required.', ephemeral: true });
     }
@@ -988,11 +1109,21 @@ client.on(Events.InteractionCreate, interaction => {
             return;
         }
         if (interaction.customId === 'ticket:create') {
-            handleTicketOpen(interaction).catch(async error => {
-                reportError('Ticket panel interaction failed', error);
+            handleTicketCreateButton(interaction).catch(async error => {
+                reportError('Ticket panel create action failed', error);
                 if (!interaction.deferred && !interaction.replied) {
-                    await interaction.reply({ content: `Could not create your ticket: ${error.message}`, ephemeral: true })
+                    await interaction.reply({ content: `Could not start ticket creation: ${error.message}`, ephemeral: true })
                         .catch(replyError => reportError('Unable to report ticket panel failure', replyError));
+                }
+            });
+            return;
+        }
+        if (interaction.customId === 'ticket:close') {
+            handleTicketCloseButton(interaction).catch(async error => {
+                reportError('Ticket close panel action failed', error);
+                if (!interaction.deferred && !interaction.replied) {
+                    await interaction.reply({ content: `Could not start ticket closure: ${error.message}`, ephemeral: true })
+                        .catch(replyError => reportError('Unable to report ticket close failure', replyError));
                 }
             });
             return;
@@ -1005,6 +1136,28 @@ client.on(Events.InteractionCreate, interaction => {
             } else {
                 await interaction.reply({ content: 'The deletion operation failed; check bot logs for details.', ephemeral: true })
                     .catch(replyError => reportError('Unable to report purge failure', replyError));
+            }
+        });
+        return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket:create:modal:')) {
+        const subject = interaction.fields.getTextInputValue('subject');
+        handleTicketOpen(interaction, subject).catch(async error => {
+            reportError('Ticket creation form failed', error);
+            if (!interaction.deferred && !interaction.replied) {
+                await interaction.reply({ content: `Could not create your ticket: ${error.message}`, ephemeral: true })
+                    .catch(replyError => reportError('Unable to report ticket creation failure', replyError));
+            }
+        });
+        return;
+    }
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket:close:modal:')) {
+        handleTicketClose(interaction).catch(async error => {
+            reportError('Ticket close form failed', error);
+            if (!interaction.deferred && !interaction.replied) {
+                await interaction.reply({ content: `Could not close your ticket: ${error.message}`, ephemeral: true })
+                    .catch(replyError => reportError('Unable to report ticket closure failure', replyError));
             }
         });
         return;

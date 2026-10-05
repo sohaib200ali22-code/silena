@@ -12,7 +12,7 @@ const CONFIRMATION_STEPS = [
     {
         label: '2/3 - Confirm moderation behavior',
         style: ButtonStyle.Secondary,
-        text: 'Step 2 of 3: Silena will also delete configured invite/link violations, mass mentions, and spam bursts. Existing anti-spam thresholds apply; no automatic timeout or ban is performed.'
+        text: 'Step 2 of 3: Silena will also delete configured invite/link violations and mass mentions. A spam burst above your configured threshold will have its messages deleted and trigger a 1-hour timeout when Silena has permission and role hierarchy allows it.'
     },
     {
         label: '3/3 - Enable Silena Guard',
@@ -182,7 +182,7 @@ function createSilenaGuard({
             accountAgeLimitDays: 7
         });
         await interaction.update({
-            content: 'Silena Guard is now **ON**. Accounts younger than 7 days will be kicked on join, and configured invite/link, mass-mention, and spam protections are active. No timeout or ban automation is enabled.',
+            content: 'Silena Guard is now **ON**. Accounts younger than 7 days will be kicked on join, configured invite/link and mass-mention violations will be deleted, and spam bursts will be deleted with an attempted 1-hour timeout. No automatic ban is enabled.',
             components: []
         });
         return true;
@@ -254,6 +254,7 @@ function createSilenaGuard({
 
 module.exports = {
     ACCOUNT_AGE_LIMIT_MS,
+    CONFIRMATION_STEPS,
     CONFIRMATION_TTL_MS,
     createSilenaGuard,
     isAccountYoungerThanLimit
