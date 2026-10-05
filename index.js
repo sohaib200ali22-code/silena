@@ -4,7 +4,6 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
-    ChannelType,
     Client,
     EmbedBuilder,
     Events,
@@ -18,6 +17,8 @@ const { createHealthServer } = require('./health-server');
 const { registerGuildCommands } = require('./register-commands');
 const { setChannelLocked } = require('./channel-lock');
 const { deleteUserMessages, scanRecentMessages } = require('./purge-user-messages');
+const { createAnnouncementFlow } = require('./announcement-flow');
+const { createTicketPanelFlow } = require('./ticket-panel-flow');
 const {
     canCloseTicket,
     closePrivateTicket,
@@ -56,7 +57,6 @@ const botCommandPermissions = {
     lock: PermissionFlagsBits.ManageChannels,
     unlock: PermissionFlagsBits.ManageChannels,
     'ticket-panel': PermissionFlagsBits.SendMessages | PermissionFlagsBits.EmbedLinks,
-    announcement: PermissionFlagsBits.SendMessages | PermissionFlagsBits.EmbedLinks,
     timeout: PermissionFlagsBits.ModerateMembers,
     kick: PermissionFlagsBits.KickMembers,
     ban: PermissionFlagsBits.BanMembers
@@ -64,6 +64,20 @@ const botCommandPermissions = {
 const pendingUserPurges = new Map();
 const openingTickets = new Set();
 const closingTickets = new Set();
+const announcementFlow = createAnnouncementFlow({
+    client,
+    config,
+    createSilenaEmbed,
+    logEvent,
+    reportError
+});
+const ticketPanelFlow = createTicketPanelFlow({
+    client,
+    config,
+    createSilenaEmbed,
+    logEvent,
+    reportError
+});
 
 function logEvent(type, details) {
     console.info(JSON.stringify({ type, at: new Date().toISOString(), ...details }));
@@ -358,10 +372,10 @@ async function handleCommand(interaction) {
     let targetMember;
 
     if (commandName === 'ticket-panel') {
-        return handleTicketPanel(interaction);
+        return ticketPanelFlow.start(interaction);
     }
     if (commandName === 'announcement') {
-        return handleAnnouncement(interaction);
+        return announcementFlow.start(interaction);
     }
 
     if (commandName === 'lock' || commandName === 'unlock') {
@@ -687,86 +701,28 @@ function createSilenaEmbed(title, description) {
         .setTimestamp();
 }
 
-async function handleTicketPanel(interaction) {
-    const channel = interaction.channel;
-    if (!channel?.isTextBased() || !channel.send) {
-        return interaction.reply({ content: 'The ticket panel can only be posted in a text channel.', ephemeral: true });
-    }
-    if (!interaction.appPermissions?.has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
-        return interaction.reply({ content: 'Silena needs Send Messages and Embed Links in this channel to post the ticket panel.', ephemeral: true });
-    }
-
-    const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-            .setCustomId('ticket:create')
-            .setLabel('Create Ticket')
-            .setStyle(ButtonStyle.Primary)
-    );
-    try {
-        const panel = await channel.send({
-            embeds: [createSilenaEmbed(
-                'Need help?',
-                'Press **Create Ticket** to open a private support channel. Only you, support staff, and Silena can see it.'
-            )],
-            components: [row],
-            allowedMentions: { parse: [] }
-        });
-        logEvent('ticket_panel_posted', {
-            guildId: interaction.guildId,
-            channelId: channel.id,
-            messageId: panel.id,
-            actorId: interaction.user.id
-        });
-        return interaction.reply({ content: 'Ticket panel posted.', ephemeral: true });
-    } catch (error) {
-        reportError('Unable to post ticket panel', error);
-        return interaction.reply({ content: `Could not post ticket panel: ${error.message}`, ephemeral: true });
-    }
-}
-
-async function handleAnnouncement(interaction) {
-    const destination = interaction.options.getChannel('channel') || interaction.channel;
-    if (
-        !destination ||
-        destination.guildId !== config.guildId ||
-        destination.type !== ChannelType.GuildText ||
-        !destination.send
-    ) {
-        return interaction.reply({ content: 'Choose a text channel in the configured server.', ephemeral: true });
-    }
-    const destinationPermissions = destination.permissionsFor(client.user);
-    if (!destinationPermissions?.has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
-        return interaction.reply({ content: 'Silena needs Send Messages and Embed Links in the announcement channel.', ephemeral: true });
-    }
-
-    const title = interaction.options.getString('title', true).trim();
-    const message = interaction.options.getString('message', true).trim();
-    if (!title || !message) {
-        return interaction.reply({ content: 'Announcement title and message cannot be blank.', ephemeral: true });
-    }
-
-    await interaction.deferReply({ ephemeral: true });
-    try {
-        const announcement = await destination.send({
-            embeds: [createSilenaEmbed(title, message)],
-            allowedMentions: { parse: [] }
-        });
-        logEvent('announcement_posted', {
-            guildId: interaction.guildId,
-            channelId: destination.id,
-            messageId: announcement.id,
-            actorId: interaction.user.id,
-            title
-        });
-        return interaction.editReply(`Announcement posted in <#${destination.id}>.`);
-    } catch (error) {
-        reportError('Unable to post announcement', error);
-        return interaction.editReply(`Could not post announcement: ${error.message}`);
-    }
-}
-
 client.on(Events.InteractionCreate, interaction => {
     if (interaction.isButton()) {
+        if (interaction.customId.startsWith('announcement:')) {
+            announcementFlow.handleButton(interaction).catch(async error => {
+                reportError('Announcement action failed', error);
+                if (!interaction.deferred && !interaction.replied) {
+                    await interaction.reply({ content: 'The announcement action failed. Check bot logs for details.', ephemeral: true })
+                        .catch(replyError => reportError('Unable to report announcement failure', replyError));
+                }
+            });
+            return;
+        }
+        if (interaction.customId.startsWith('ticket-panel:')) {
+            ticketPanelFlow.handleButton(interaction).catch(async error => {
+                reportError('Ticket panel action failed', error);
+                if (!interaction.deferred && !interaction.replied) {
+                    await interaction.reply({ content: 'The ticket panel action failed. Check bot logs for details.', ephemeral: true })
+                        .catch(replyError => reportError('Unable to report ticket panel failure', replyError));
+                }
+            });
+            return;
+        }
         if (interaction.customId === 'ticket:create') {
             handleTicketOpen(interaction).catch(async error => {
                 reportError('Ticket panel interaction failed', error);
@@ -785,6 +741,27 @@ client.on(Events.InteractionCreate, interaction => {
             } else {
                 await interaction.reply({ content: 'The deletion operation failed; check bot logs for details.', ephemeral: true })
                     .catch(replyError => reportError('Unable to report purge failure', replyError));
+            }
+        });
+        return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('announcement:modal:')) {
+        announcementFlow.handleModal(interaction).catch(async error => {
+            reportError('Announcement modal failed', error);
+            if (!interaction.deferred && !interaction.replied) {
+                await interaction.reply({ content: 'The announcement form failed. Check bot logs for details.', ephemeral: true })
+                    .catch(replyError => reportError('Unable to report announcement form failure', replyError));
+            }
+        });
+        return;
+    }
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket-panel:modal:')) {
+        ticketPanelFlow.handleModal(interaction).catch(async error => {
+            reportError('Ticket panel form failed', error);
+            if (!interaction.deferred && !interaction.replied) {
+                await interaction.reply({ content: 'The ticket panel form failed. Check bot logs for details.', ephemeral: true })
+                    .catch(replyError => reportError('Unable to report ticket panel form failure', replyError));
             }
         });
         return;
