@@ -24,12 +24,14 @@ test('registers the existing Silena commands to the configured guild', async () 
         'unlock',
         'ticket',
         'close',
+        'ticket-panel',
+        'announcement',
         'timeout',
         'warn',
         'kick',
         'ban'
     ]);
-    assert.deepEqual(result, { count: 9, guildId: config.guildId });
+    assert.deepEqual(result, { count: 11, guildId: config.guildId });
 });
 
 test('propagates Discord REST registration failures', async () => {

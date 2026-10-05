@@ -1,4 +1,4 @@
-const { PermissionFlagsBits, SlashCommandBuilder } = require('discord.js');
+const { ChannelType, PermissionFlagsBits, SlashCommandBuilder } = require('discord.js');
 
 function createCommandDefinitions() {
     return [
@@ -50,6 +50,28 @@ function createCommandDefinitions() {
                     .setDescription('Required reason for closing this ticket')
                     .setRequired(true)
                     .setMaxLength(500)),
+        new SlashCommandBuilder()
+            .setName('ticket-panel')
+            .setDescription('Post the Silena ticket creation panel in this channel')
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+        new SlashCommandBuilder()
+            .setName('announcement')
+            .setDescription('Publish a Silena-branded announcement')
+            .addStringOption(option =>
+                option.setName('title')
+                    .setDescription('Announcement title')
+                    .setRequired(true)
+                    .setMaxLength(256))
+            .addStringOption(option =>
+                option.setName('message')
+                    .setDescription('Announcement message')
+                    .setRequired(true)
+                    .setMaxLength(4000))
+            .addChannelOption(option =>
+                option.setName('channel')
+                    .setDescription('Destination channel (defaults to this channel)')
+                    .addChannelTypes(ChannelType.GuildText))
+            .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
         new SlashCommandBuilder()
             .setName('timeout')
             .setDescription('Temporarily timeout a server member')
