@@ -1,13 +1,13 @@
 {
   "name": "silena-bot",
   "version": "1.0.0",
-  "description": "Private Discord bot for moderation and administration",
+  "description": "Private Discord bot for moderation",
   "main": "index.js",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "start": "node index.js",
+    "start": "node deploy-commands.js && node index.js",
     "deploy:commands": "node deploy-commands.js",
     "test": "node --test"
   },
