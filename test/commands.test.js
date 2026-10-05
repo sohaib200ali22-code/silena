@@ -15,7 +15,9 @@ test('defines moderation commands with permission defaults and bounded options',
         'announcement',
         'serverinfo',
         'userinfo',
+        'silena',
         'timeout',
+        'untimeout',
         'warn',
         'kick',
         'ban'
@@ -27,6 +29,8 @@ test('defines moderation commands with permission defaults and bounded options',
     assert.equal(clear.options[0].required, false);
     assert.equal(clear.options[1].name, 'user');
     assert.equal(commands.find(command => command.name === 'timeout').options[1].max_value, 40320);
+    assert.equal(commands.find(command => command.name === 'untimeout').options[0].required, true);
+    assert.equal(commands.find(command => command.name === 'untimeout').default_member_permissions, '1099511627776');
     assert.equal(commands.find(command => command.name === 'lock').default_member_permissions, '16');
     assert.equal(commands.find(command => command.name === 'unlock').default_member_permissions, '16');
     const slowmode = commands.find(command => command.name === 'slowmode');
@@ -44,4 +48,7 @@ test('defines moderation commands with permission defaults and bounded options',
     assert.equal(announcement.options[1].required, false);
     assert.equal(commands.find(command => command.name === 'userinfo').options[0].required, true);
     assert.ok(commands.find(command => command.name === 'serverinfo').default_member_permissions);
+    const silena = commands.find(command => command.name === 'silena');
+    assert.deepEqual(silena.options.map(option => option.name), ['enable', 'status', 'disable']);
+    assert.equal(silena.default_member_permissions, '32');
 });

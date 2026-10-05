@@ -10,22 +10,25 @@ async function notifyModerationTarget({
     logEvent,
     reportError
 }) {
+    const isBanNotice = action === 'ban';
     const description = [
         `A moderation action was taken against you in **${guildName}**.`,
         `Action: **${action}**`,
         durationMinutes ? `Duration: **${durationMinutes} minute(s)**` : null,
-        `Reason: ${reason}`
+        `Reason: ${reason}`,
+        isBanNotice ? 'If you want to appeal, reply to this message with your explanation.' : null
     ].filter(Boolean).join('\n');
 
     try {
+        const embed = new EmbedBuilder()
+            .setColor(0xED4245)
+            .setTitle('Moderation notice')
+            .setDescription(description)
+            .setTimestamp();
+        if (isBanNotice) embed.setFooter({ text: 'silena:ban-notice' });
+
         await user.send({
-            embeds: [
-                new EmbedBuilder()
-                    .setColor(0xED4245)
-                    .setTitle('Moderation notice')
-                    .setDescription(description)
-                    .setTimestamp()
-            ],
+            embeds: [embed],
             allowedMentions: { parse: [] }
         });
         logEvent('moderation_dm_sent', {
