@@ -346,6 +346,24 @@ client.on(Events.MessageCreate, message => {
 });
 
 async function handleCommand(interaction) {
+    try {
+        return await dispatchCommand(interaction);
+    } catch (error) {
+        reportError(`Command ${interaction.commandName || 'unknown'} failed`, error);
+        const response = {
+            content: 'The command failed. Check the bot logs for details.',
+            ephemeral: true
+        };
+        const sendResponse = interaction.deferred || interaction.replied
+            ? interaction.followUp(response)
+            : interaction.reply(response);
+        await sendResponse.catch(replyError => {
+            reportError('Unable to report command failure', replyError);
+        });
+    }
+}
+
+async function dispatchCommand(interaction) {
     if (!interaction.isChatInputCommand()) return;
 
     if (!interaction.inGuild() || interaction.guildId !== config.guildId) {
