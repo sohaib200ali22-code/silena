@@ -1,4 +1,5 @@
 const { ChannelType, PermissionFlagsBits } = require('discord.js');
+const { archiveTicketTranscript } = require('./ticket-transcript');
 
 const TICKET_TOPIC_PREFIX = 'silena-ticket:v1';
 
@@ -119,30 +120,41 @@ function canCloseTicket({ userId, ownerId, openerId, staffRoleId, memberRoleIds 
     return userId === ownerId || userId === openerId || memberRoleIds.includes(staffRoleId);
 }
 
-async function closePrivateTicket(channel, { closerId, closerTag, reason }) {
+async function closePrivateTicket(channel, archiveChannel, { closerId, closerTag, reason, closedAt = new Date() }) {
     const ticket = parseTicketTopic(channel.topic);
     if (!ticket) throw new Error('This channel is not a Silena ticket.');
 
-    if (ticket.status === 'open') {
+    try {
         await channel.send({
             content: `Ticket closed by ${closerTag} (<@${closerId}>). Reason: ${reason}`,
             allowedMentions: { parse: [] }
         });
-        await channel.setTopic(makeTicketTopic('closed', ticket.openerId), `Ticket closed: ${reason}`);
-    }
-    if (!channel.name.startsWith('closed-')) {
-        await channel.setName(`closed-${channel.name}`.slice(0, 100), `Ticket closed: ${reason}`);
+    } catch (error) {
+        error.ticketCloseReasonPostFailed = true;
+        throw error;
     }
 
-    await channel.permissionOverwrites.edit(
-        ticket.openerId,
-        {
-            ViewChannel: false,
-            SendMessages: false
-        },
-        { reason: `Ticket closed: ${reason}` }
-    );
-    return ticket;
+    let archive;
+    try {
+        archive = await archiveTicketTranscript(channel, archiveChannel, {
+            closeReason: reason,
+            closedBy: { id: closerId, tag: closerTag },
+            closedAt
+        });
+    } catch (error) {
+        error.ticketArchiveFailed = true;
+        throw error;
+    }
+
+    try {
+        await channel.delete(`Ticket transcript archived as ${archive.filename}; closed: ${reason}`);
+    } catch (error) {
+        error.ticketArchive = archive;
+        error.ticketDeleteFailed = true;
+        throw error;
+    }
+
+    return { ...ticket, archive };
 }
 
 module.exports = {

@@ -4,6 +4,7 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
+    ChannelType,
     Client,
     EmbedBuilder,
     Events,
@@ -42,6 +43,8 @@ const commandPermissions = {
     clear: PermissionFlagsBits.ManageMessages,
     lock: PermissionFlagsBits.ManageChannels,
     unlock: PermissionFlagsBits.ManageChannels,
+    'ticket-panel': PermissionFlagsBits.ManageGuild,
+    announcement: PermissionFlagsBits.ManageGuild,
     timeout: PermissionFlagsBits.ModerateMembers,
     warn: PermissionFlagsBits.ModerateMembers,
     kick: PermissionFlagsBits.KickMembers,
@@ -52,12 +55,15 @@ const botCommandPermissions = {
     clear: PermissionFlagsBits.ManageMessages,
     lock: PermissionFlagsBits.ManageChannels,
     unlock: PermissionFlagsBits.ManageChannels,
+    'ticket-panel': PermissionFlagsBits.SendMessages | PermissionFlagsBits.EmbedLinks,
+    announcement: PermissionFlagsBits.SendMessages | PermissionFlagsBits.EmbedLinks,
     timeout: PermissionFlagsBits.ModerateMembers,
     kick: PermissionFlagsBits.KickMembers,
     ban: PermissionFlagsBits.BanMembers
 };
 const pendingUserPurges = new Map();
 const openingTickets = new Set();
+const closingTickets = new Set();
 
 function logEvent(type, details) {
     console.info(JSON.stringify({ type, at: new Date().toISOString(), ...details }));
@@ -351,6 +357,13 @@ async function handleCommand(interaction) {
     let targetUser;
     let targetMember;
 
+    if (commandName === 'ticket-panel') {
+        return handleTicketPanel(interaction);
+    }
+    if (commandName === 'announcement') {
+        return handleAnnouncement(interaction);
+    }
+
     if (commandName === 'lock' || commandName === 'unlock') {
         if (!interaction.channel) {
             return interaction.reply({ content: 'This command requires a channel.', ephemeral: true });
@@ -526,10 +539,7 @@ async function handleTicketOpen(interaction) {
         if (existing) {
             return interaction.editReply(`You already have an open ticket: <#${existing.id}>.`);
         }
-        const subject = interaction.options.getString('subject', true).trim();
-        if (!subject) {
-            return interaction.editReply('Please provide a short ticket subject.');
-        }
+        const subject = interaction.options?.getString('subject')?.trim() || 'Support request';
 
         const ticket = await createPrivateTicket({
             guild: interaction.guild,
@@ -600,12 +610,19 @@ async function handleTicketClose(interaction) {
         });
     }
 
-    const requiredBotPermissions = PermissionFlagsBits.ManageChannels | PermissionFlagsBits.ManageRoles;
-    if (!interaction.appPermissions?.has(requiredBotPermissions) || !interaction.appPermissions.has(PermissionFlagsBits.SendMessages)) {
+    const requiredBotPermissions = [
+        PermissionFlagsBits.ManageChannels,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory
+    ];
+    if (!interaction.appPermissions?.has(requiredBotPermissions)) {
         return interaction.reply({
-            content: 'Silena needs Send Messages, Manage Channels, and Manage Roles in this ticket to close it safely.',
+            content: 'Silena needs Send Messages, Read Message History, and Manage Channels in this ticket to archive and close it.',
             ephemeral: true
         });
+    }
+    if (closingTickets.has(channel.id)) {
+        return interaction.reply({ content: 'This ticket is already being archived. Please wait.', ephemeral: true });
     }
 
     const reason = interaction.options.getString('reason', true).trim();
@@ -613,29 +630,153 @@ async function handleTicketClose(interaction) {
         return interaction.reply({ content: 'A close reason is required.', ephemeral: true });
     }
 
-    await interaction.deferReply({ ephemeral: true });
+    closingTickets.add(channel.id);
     try {
-        await closePrivateTicket(channel, {
+        await interaction.deferReply({ ephemeral: true });
+        const archiveChannel = await client.channels.fetch(config.ticketsChannelId);
+        if (!archiveChannel || archiveChannel.guildId !== config.guildId || !archiveChannel.isTextBased()) {
+            throw new Error(`Configured TICKETS_CHANNEL_ID ${config.ticketsChannelId} is not a text channel in the configured server.`);
+        }
+        const archivePermissions = archiveChannel.permissionsFor(client.user);
+        if (!archivePermissions?.has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.AttachFiles])) {
+            throw new Error('Silena lacks Send Messages or Attach Files permission in the configured ticket archive channel.');
+        }
+
+        const result = await closePrivateTicket(channel, archiveChannel, {
             closerId: interaction.user.id,
             closerTag: interaction.user.tag || interaction.user.username,
-            reason
+            reason,
+            closedAt: new Date()
         });
         logEvent('ticket_closed', {
             guildId: interaction.guildId,
             channelId: channel.id,
             openerId: ticket.openerId,
             closerId: interaction.user.id,
-            reason
+            reason,
+            archiveMessageId: result.archive.message.id,
+            transcriptMessages: result.archive.messageCount,
+            transcriptIncludedMessages: result.archive.includedMessages,
+            transcriptOmittedMessages: result.archive.omittedMessages,
+            transcriptScanLimitReached: result.archive.scanLimitReached
         });
-        return interaction.editReply(`Ticket archived. Reason: ${reason}`);
+        return interaction.editReply(`Transcript saved in <#${config.ticketsChannelId}> and the ticket channel was deleted. Reason: ${reason}`);
     } catch (error) {
         reportError(`Failed to archive ticket channel ${channel.id}`, error);
-        return interaction.editReply(`Could not fully archive this ticket: ${error.message}. The transcript has not been deleted; check bot permissions and retry.`);
+        if (error.ticketArchiveFailed || error.ticketCloseReasonPostFailed) {
+            return interaction.editReply(`Ticket was not deleted. ${error.ticketArchiveFailed ? 'Transcript archival failed' : 'The close reason could not be posted'}: ${error.message}. Fix the configuration or permissions and retry.`);
+        }
+        if (error.ticketDeleteFailed) {
+            return interaction.editReply(`Transcript was saved in <#${config.ticketsChannelId}>, but the ticket channel could not be deleted: ${error.message}. You may delete it manually.`);
+        }
+        return interaction.editReply(`Ticket was not deleted because archival could not start: ${error.message}`);
+    } finally {
+        closingTickets.delete(channel.id);
+    }
+}
+
+function createSilenaEmbed(title, description) {
+    return new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setAuthor({
+            name: client.user.username,
+            iconURL: client.user.displayAvatarURL()
+        })
+        .setTitle(title)
+        .setDescription(description)
+        .setTimestamp();
+}
+
+async function handleTicketPanel(interaction) {
+    const channel = interaction.channel;
+    if (!channel?.isTextBased() || !channel.send) {
+        return interaction.reply({ content: 'The ticket panel can only be posted in a text channel.', ephemeral: true });
+    }
+    if (!interaction.appPermissions?.has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
+        return interaction.reply({ content: 'Silena needs Send Messages and Embed Links in this channel to post the ticket panel.', ephemeral: true });
+    }
+
+    const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId('ticket:create')
+            .setLabel('Create Ticket')
+            .setStyle(ButtonStyle.Primary)
+    );
+    try {
+        const panel = await channel.send({
+            embeds: [createSilenaEmbed(
+                'Need help?',
+                'Press **Create Ticket** to open a private support channel. Only you, support staff, and Silena can see it.'
+            )],
+            components: [row],
+            allowedMentions: { parse: [] }
+        });
+        logEvent('ticket_panel_posted', {
+            guildId: interaction.guildId,
+            channelId: channel.id,
+            messageId: panel.id,
+            actorId: interaction.user.id
+        });
+        return interaction.reply({ content: 'Ticket panel posted.', ephemeral: true });
+    } catch (error) {
+        reportError('Unable to post ticket panel', error);
+        return interaction.reply({ content: `Could not post ticket panel: ${error.message}`, ephemeral: true });
+    }
+}
+
+async function handleAnnouncement(interaction) {
+    const destination = interaction.options.getChannel('channel') || interaction.channel;
+    if (
+        !destination ||
+        destination.guildId !== config.guildId ||
+        destination.type !== ChannelType.GuildText ||
+        !destination.send
+    ) {
+        return interaction.reply({ content: 'Choose a text channel in the configured server.', ephemeral: true });
+    }
+    const destinationPermissions = destination.permissionsFor(client.user);
+    if (!destinationPermissions?.has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
+        return interaction.reply({ content: 'Silena needs Send Messages and Embed Links in the announcement channel.', ephemeral: true });
+    }
+
+    const title = interaction.options.getString('title', true).trim();
+    const message = interaction.options.getString('message', true).trim();
+    if (!title || !message) {
+        return interaction.reply({ content: 'Announcement title and message cannot be blank.', ephemeral: true });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    try {
+        const announcement = await destination.send({
+            embeds: [createSilenaEmbed(title, message)],
+            allowedMentions: { parse: [] }
+        });
+        logEvent('announcement_posted', {
+            guildId: interaction.guildId,
+            channelId: destination.id,
+            messageId: announcement.id,
+            actorId: interaction.user.id,
+            title
+        });
+        return interaction.editReply(`Announcement posted in <#${destination.id}>.`);
+    } catch (error) {
+        reportError('Unable to post announcement', error);
+        return interaction.editReply(`Could not post announcement: ${error.message}`);
     }
 }
 
 client.on(Events.InteractionCreate, interaction => {
     if (interaction.isButton()) {
+        if (interaction.customId === 'ticket:create') {
+            handleTicketOpen(interaction).catch(async error => {
+                reportError('Ticket panel interaction failed', error);
+                if (!interaction.deferred && !interaction.replied) {
+                    await interaction.reply({ content: `Could not create your ticket: ${error.message}`, ephemeral: true })
+                        .catch(replyError => reportError('Unable to report ticket panel failure', replyError));
+                }
+            });
+            return;
+        }
         handleUserPurgeButton(interaction).catch(async error => {
             reportError('User purge confirmation failed', error);
             if (interaction.deferred || interaction.replied) {

@@ -21,7 +21,9 @@ function createGuild(overrides = {}) {
     const channel = {
         id: '56789012345678901',
         name: 'ticket-help-ticket-user-6789',
+        guildId: '23456789012345678',
         topic: `silena-ticket:v1:open:${opener.id}`,
+        messages: { async fetch() { return new Map(); } },
         async send(message) {
             calls.notification = message;
         },
@@ -184,30 +186,31 @@ test('only opener, configured staff, or owner can close a ticket', () => {
     assert.equal(canCloseTicket({ ...args, userId: '78901234567890123' }), false);
 });
 
-test('closing preserves the transcript and removes opener channel access', async () => {
+test('closing archives the transcript before deleting the private channel', async () => {
     const calls = [];
     const channel = {
+        id: '56789012345678901',
+        guildId: '23456789012345678',
         topic: `silena-ticket:v1:open:${opener.id}`,
         name: 'ticket-help',
+        messages: { async fetch() { return new Map(); } },
         async send(message) {
             calls.push(['send', message]);
         },
-        async setTopic(topic, reason) {
-            calls.push(['topic', topic, reason]);
-            this.topic = topic;
-        },
-        async setName(name, reason) {
-            calls.push(['name', name, reason]);
-            this.name = name;
-        },
-        permissionOverwrites: {
-            async edit(userId, permissions, options) {
-                calls.push(['overwrite', userId, permissions, options]);
-            }
+        async delete(reason) {
+            calls.push(['delete', reason]);
+        }
+    };
+    const archiveChannel = {
+        guildId: channel.guildId,
+        isTextBased: () => true,
+        async send(message) {
+            calls.push(['archive', message]);
+            return { id: '67890123456789012' };
         }
     };
 
-    await closePrivateTicket(channel, {
+    await closePrivateTicket(channel, archiveChannel, {
         closerId: '78901234567890123',
         closerTag: 'Staff#1234',
         reason: 'Issue resolved'
@@ -215,34 +218,37 @@ test('closing preserves the transcript and removes opener channel access', async
 
     assert.equal(calls[0][0], 'send');
     assert.match(calls[0][1].content, /Reason: Issue resolved/);
-    assert.deepEqual(calls.at(-1), [
-        'overwrite',
-        opener.id,
-        { ViewChannel: false, SendMessages: false },
-        { reason: 'Ticket closed: Issue resolved' }
-    ]);
-    assert.match(channel.name, /^closed-ticket-help/);
-    assert.equal(parseTicketTopic(channel.topic).status, 'closed');
+    assert.equal(calls[1][0], 'archive');
+    assert.match(calls[1][1].content, /Reason: Issue resolved/);
+    assert.equal(calls[1][1].files[0].name, `ticket-${channel.id}-transcript.txt`);
+    assert.equal(calls[2][0], 'delete');
 });
 
-test('closing a ticket can retry access revocation without reposting transcript notice', async () => {
+test('does not delete ticket if transcript archival fails', async () => {
     const calls = [];
     const channel = {
+        id: '56789012345678901',
+        guildId: '23456789012345678',
         topic: `silena-ticket:v1:closed:${opener.id}`,
-        name: 'closed-ticket-help',
-        permissionOverwrites: {
-            async edit(...args) {
-                calls.push(args);
-            }
+        name: 'ticket-help',
+        messages: { async fetch() { return new Map(); } },
+        async send() { calls.push('close-reason'); },
+        async delete() { calls.push('delete'); }
+    };
+    const archiveChannel = {
+        guildId: channel.guildId,
+        isTextBased: () => true,
+        async send() {
+            throw new Error('Archive denied');
         }
     };
-    await closePrivateTicket(channel, {
+
+    await assert.rejects(closePrivateTicket(channel, archiveChannel, {
         closerId: opener.id,
         closerTag: opener.tag,
         reason: 'Retry closure'
-    });
-    assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0][1], { ViewChannel: false, SendMessages: false });
+    }), error => error.ticketArchiveFailed && error.message === 'Archive denied');
+    assert.deepEqual(calls, ['close-reason']);
 });
 
 test('only open or closed Silena ticket topics are accepted', async () => {
