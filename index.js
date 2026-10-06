@@ -24,7 +24,7 @@ const { setChannelLocked } = require('./channel-lock');
 const { deleteUserMessages, scanRecentMessages } = require('./purge-user-messages');
 const { createAnnouncementFlow } = require('./announcement-flow');
 const { createTicketPanelFlow } = require('./ticket-panel-flow');
-const { createBanActionEmbed, notifyModerationTarget } = require('./moderation-notifications');
+const { banWithNotice, createBanActionEmbed, notifyModerationTarget } = require('./moderation-notifications');
 const { createTicketReminderService } = require('./ticket-reminders');
 const { createSilenaGuard } = require('./silena-guard');
 const { createMessageAuditLogger } = require('./message-audit-logger');
@@ -772,15 +772,17 @@ async function dispatchCommand(interaction) {
             return interaction.reply({ content: 'I cannot ban this user due to role hierarchy.', ephemeral: true });
         }
 
-        await guild.members.ban(targetUser.id, { reason });
-        const dmSent = await notifyModerationTarget({
-            user: targetUser,
-            guildId: guild.id,
-            guildName: guild.name,
-            action: 'ban',
-            reason,
-            logEvent,
-            reportError
+        const dmSent = await banWithNotice({
+            notify: () => notifyModerationTarget({
+                user: targetUser,
+                guildId: guild.id,
+                guildName: guild.name,
+                action: 'ban',
+                reason,
+                logEvent,
+                reportError
+            }),
+            ban: () => guild.members.ban(targetUser.id, { reason })
         });
         logEvent('moderation_action', {
             guildId: guild.id,
