@@ -24,7 +24,7 @@ const { setChannelLocked } = require('./channel-lock');
 const { deleteUserMessages, scanRecentMessages } = require('./purge-user-messages');
 const { createAnnouncementFlow } = require('./announcement-flow');
 const { createTicketPanelFlow } = require('./ticket-panel-flow');
-const { notifyModerationTarget } = require('./moderation-notifications');
+const { createBanActionEmbed, notifyModerationTarget } = require('./moderation-notifications');
 const { createTicketReminderService } = require('./ticket-reminders');
 const { createSilenaGuard } = require('./silena-guard');
 const { createMessageAuditLogger } = require('./message-audit-logger');
@@ -790,7 +790,14 @@ async function dispatchCommand(interaction) {
             dmSent,
             reason
         });
-        return interaction.reply({ content: `**${targetUser.tag}** was banned. Reason: ${reason}. DM notice ${dmSent ? 'sent' : 'could not be delivered'}.` });
+        return interaction.reply({
+            embeds: [createBanActionEmbed({
+                user: targetUser,
+                moderator: interaction.user,
+                reason,
+                dmSent
+            })]
+        });
     }
 
     return interaction.reply({ content: 'Unknown command.', ephemeral: true });
@@ -929,7 +936,7 @@ async function handleTicketCloseButton(interaction) {
     }
     if (!await canUserCloseTicket(interaction, ticket)) {
         return interaction.reply({
-            content: 'Only the ticket opener, configured staff role, or bot owner can close this ticket.',
+            content: 'Only members with the configured staff role can close this ticket.',
             ephemeral: true
         });
     }
@@ -953,9 +960,6 @@ async function canUserCloseTicket(interaction, ticket) {
             ? roles
             : [];
     return canCloseTicket({
-        userId: interaction.user.id,
-        ownerId: config.ownerId,
-        openerId: ticket.openerId,
         staffRoleId: config.staffRoleId,
         memberRoleIds
     });
@@ -979,7 +983,7 @@ async function handleTicketClose(interaction) {
     }
     if (!await canUserCloseTicket(interaction, ticket)) {
         return interaction.reply({
-            content: 'Only the ticket opener, configured staff role, or bot owner can close this ticket.',
+            content: 'Only members with the configured staff role can close this ticket.',
             ephemeral: true
         });
     }

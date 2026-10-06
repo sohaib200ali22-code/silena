@@ -174,21 +174,16 @@ test('requires a valid pingable staff role configuration', async () => {
     );
 });
 
-test('only opener, configured staff, or owner can close a ticket', () => {
+test('only members with the configured staff role can close a ticket', () => {
     const args = {
-        ownerId: '34567890123456789',
-        openerId: opener.id,
         staffRoleId: staffRole.id,
         memberRoleIds: []
     };
-    assert.equal(canCloseTicket({ ...args, userId: opener.id }), true);
-    assert.equal(canCloseTicket({ ...args, userId: args.ownerId }), true);
     assert.equal(canCloseTicket({
         ...args,
-        userId: '78901234567890123',
         memberRoleIds: [staffRole.id]
     }), true);
-    assert.equal(canCloseTicket({ ...args, userId: '78901234567890123' }), false);
+    assert.equal(canCloseTicket(args), false);
 });
 
 test('closing archives the transcript before deleting the private channel', async () => {

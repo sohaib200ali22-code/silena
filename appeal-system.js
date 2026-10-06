@@ -129,10 +129,14 @@ function createAppealService({ client, config, logEvent, reportError }) {
             }
 
             await logsChannel.send({
+                content: `<@${config.ownerId}> New ban appeal for review.`,
                 embeds: [embed],
                 components: [createReviewRow(message.author.id, message.id)],
                 ...(files.length ? { files } : {}),
-                allowedMentions: { parse: [] }
+                allowedMentions: {
+                    parse: [],
+                    users: [config.ownerId]
+                }
             });
         } catch (error) {
             reportError(`Unable to forward ban appeal from user ${message.author.id}`, error);
