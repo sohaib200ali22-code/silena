@@ -63,4 +63,10 @@ function createBanActionEmbed({ user, moderator, reason, dmSent }) {
         .setTimestamp();
 }
 
-module.exports = { createBanActionEmbed, notifyModerationTarget };
+async function banWithNotice({ notify, ban }) {
+    const dmSent = await notify();
+    await ban();
+    return dmSent;
+}
+
+module.exports = { banWithNotice, createBanActionEmbed, notifyModerationTarget };

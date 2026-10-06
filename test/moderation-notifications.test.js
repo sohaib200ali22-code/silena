@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createBanActionEmbed, notifyModerationTarget } = require('../moderation-notifications');
+const { banWithNotice, createBanActionEmbed, notifyModerationTarget } = require('../moderation-notifications');
 const { BAN_NOTICE_MARKER } = require('../appeal-system');
 
 test('sends a mention-safe DM identifying a moderation action and reason', async () => {
@@ -88,4 +88,20 @@ test('ban confirmation is a timestamped red embed with moderator and delivery de
     assert.equal(embed.fields.find(field => field.name === 'DM notice').value, 'Could not be delivered');
     assert.equal(embed.fields.find(field => field.name === 'Reason').value, 'Repeated abuse');
     assert.ok(embed.timestamp);
+});
+
+test('sends the ban notice before banning and still bans when DM delivery fails', async () => {
+    const calls = [];
+    const dmSent = await banWithNotice({
+        notify: async () => {
+            calls.push('notice');
+            return false;
+        },
+        ban: async () => {
+            calls.push('ban');
+        }
+    });
+
+    assert.equal(dmSent, false);
+    assert.deepEqual(calls, ['notice', 'ban']);
 });
