@@ -65,10 +65,11 @@ test('forwards a reply to a marked ban notice to the configured private logs cha
 
     assert.equal(await service.handleMessage(appealMessage), true);
     assert.equal(sentToLogs.length, 1);
+    assert.equal(sentToLogs[0].content, `<@${ids.owner}> New ban appeal for review.`);
+    assert.deepEqual(sentToLogs[0].allowedMentions, { parse: [], users: [ids.owner] });
     assert.match(sentToLogs[0].embeds[0].data.title, /appeal/i);
     assert.match(sentToLogs[0].embeds[0].data.fields.find(field => field.name === 'User ID').value, new RegExp(ids.user));
     assert.equal(sentToLogs[0].components[0].components.length, 2);
-    assert.deepEqual(sentToLogs[0].allowedMentions, { parse: [] });
     assert.match(dmReplies[0].content, /sent to the server owner/i);
     assert.equal(logEvents[0][0], 'ban_appeal_submitted');
 });

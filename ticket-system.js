@@ -133,8 +133,8 @@ async function createPrivateTicket({ guild, opener, staffRoleId, botUserId, subj
     return created;
 }
 
-function canCloseTicket({ userId, ownerId, openerId, staffRoleId, memberRoleIds }) {
-    return userId === ownerId || userId === openerId || memberRoleIds.includes(staffRoleId);
+function canCloseTicket({ staffRoleId, memberRoleIds }) {
+    return memberRoleIds.includes(staffRoleId);
 }
 
 async function closePrivateTicket(channel, archiveChannel, { closerId, closerTag, reason, closedAt = new Date() }) {

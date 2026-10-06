@@ -12,11 +12,13 @@ async function notifyModerationTarget({
 }) {
     const isBanNotice = action === 'ban';
     const description = [
-        `A moderation action was taken against you in **${guildName}**.`,
+        isBanNotice
+            ? `You have been banned from **${guildName}**.`
+            : `A moderation action was taken against you in **${guildName}**.`,
         `Action: **${action}**`,
         durationMinutes ? `Duration: **${durationMinutes} minute(s)**` : null,
         `Reason: ${reason}`,
-        isBanNotice ? 'If you want to appeal, reply to this message with your explanation.' : null
+        isBanNotice ? 'To appeal, reply directly to this message with your explanation.' : null
     ].filter(Boolean).join('\n');
 
     try {
@@ -48,4 +50,17 @@ async function notifyModerationTarget({
     }
 }
 
-module.exports = { notifyModerationTarget };
+function createBanActionEmbed({ user, moderator, reason, dmSent }) {
+    return new EmbedBuilder()
+        .setTitle('User Banned')
+        .setColor(0xED4245)
+        .addFields(
+            { name: 'User', value: `${user.tag || user.username} (${user.id})`, inline: true },
+            { name: 'Moderator', value: moderator.tag || moderator.username, inline: true },
+            { name: 'DM notice', value: dmSent ? 'Sent' : 'Could not be delivered', inline: true },
+            { name: 'Reason', value: reason }
+        )
+        .setTimestamp();
+}
+
+module.exports = { createBanActionEmbed, notifyModerationTarget };

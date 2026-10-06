@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { notifyModerationTarget } = require('../moderation-notifications');
+const { createBanActionEmbed, notifyModerationTarget } = require('../moderation-notifications');
 const { BAN_NOTICE_MARKER } = require('../appeal-system');
 
 test('sends a mention-safe DM identifying a moderation action and reason', async () => {
@@ -56,7 +56,7 @@ test('reports DM failures without throwing into the moderation action', async ()
     assert.equal(events[0][0], 'moderation_dm_failed');
 });
 
-test('ban notice invites the user to reply and marks the message for appeal handling', async () => {
+test('ban notice explicitly says the user was banned, invites a direct reply, and marks the message', async () => {
     let payload;
     await notifyModerationTarget({
         user: { send: async message => { payload = message; } },
@@ -68,6 +68,24 @@ test('ban notice invites the user to reply and marks the message for appeal hand
         reportError: () => assert.fail('unexpected DM error')
     });
 
-    assert.match(payload.embeds[0].data.description, /reply to this message/i);
+    assert.match(payload.embeds[0].data.description, /you have been banned/i);
+    assert.match(payload.embeds[0].data.description, /reply directly to this message/i);
     assert.equal(payload.embeds[0].data.footer.text, BAN_NOTICE_MARKER);
+});
+
+test('ban confirmation is a timestamped red embed with moderator and delivery details', () => {
+    const embed = createBanActionEmbed({
+        user: { id: '34567890123456789', tag: 'banned-user#1234' },
+        moderator: { tag: 'moderator#1234' },
+        reason: 'Repeated abuse',
+        dmSent: false
+    }).toJSON();
+
+    assert.equal(embed.title, 'User Banned');
+    assert.equal(embed.color, 0xED4245);
+    assert.match(embed.fields.find(field => field.name === 'User').value, /banned-user#1234/);
+    assert.equal(embed.fields.find(field => field.name === 'Moderator').value, 'moderator#1234');
+    assert.equal(embed.fields.find(field => field.name === 'DM notice').value, 'Could not be delivered');
+    assert.equal(embed.fields.find(field => field.name === 'Reason').value, 'Repeated abuse');
+    assert.ok(embed.timestamp);
 });
