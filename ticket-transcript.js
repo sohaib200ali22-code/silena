@@ -2,16 +2,53 @@ const MAX_TRANSCRIPT_BYTES = 7 * 1024 * 1024;
 const MAX_TRANSCRIPT_CONTENT_BYTES = MAX_TRANSCRIPT_BYTES - 512;
 const MAX_TRANSCRIPT_MESSAGES = 10000;
 const PAGE_SIZE = 100;
+const DOWNLOAD_TIMEOUT_MS = 8_000;
 
-function messageToTranscriptLine(message) {
+async function fetchAttachmentData(attachment) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+    try {
+        const response = await fetch(attachment.url, { signal: controller.signal });
+        if (!response.ok) return `[attachment failed to download: ${attachment.url}]`;
+
+        const contentType = response.headers.get('content-type') || '';
+        
+        // لو الملف نصي أو كود: نطبع محتواه جوه الملف
+        if (contentType.includes('text') || contentType.includes('json') || contentType.includes('javascript')) {
+            const text = await response.text();
+            const safeText = text.length > 4000 ? text.slice(0, 4000) + '\n...[content truncated]' : text;
+            return `[attached text file: ${attachment.name}]\n\`\`\`\n${safeText}\n\`\`\``;
+        }
+
+        // لو صورة أو ميديا: نحفظ الـ Base64 Data URI
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        const base64 = buffer.toString('base64');
+        return `[attached file: ${attachment.name} (data:${contentType};base64,${base64.slice(0, 100)}... truncated data uri)]\nOriginal URL: ${attachment.url}`;
+    } catch {
+        return `[attachment download timeout: ${attachment.url}]`;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function messageToTranscriptLine(message) {
     const timestamp = message.createdAt?.toISOString?.() ||
         new Date(message.createdTimestamp).toISOString();
     const author = `${message.author.tag || message.author.username} (${message.author.id})`;
     const content = (message.content || '').replace(/\r\n/g, '\n');
-    const attachmentUrls = [...message.attachments.values()].map(attachment => attachment.url);
+
+    const attachmentLines = [];
+    if (message.attachments?.size) {
+        for (const attachment of message.attachments.values()) {
+            const downloadedData = await fetchAttachmentData(attachment);
+            attachmentLines.push(downloadedData);
+        }
+    }
+
     const embeds = message.embeds.map(embed => embed.url).filter(Boolean);
     const extra = [
-        ...attachmentUrls.map(url => `[attachment] ${url}`),
+        ...attachmentLines,
         ...embeds.map(url => `[embed] ${url}`)
     ];
 
@@ -40,6 +77,7 @@ async function buildTicketTranscript(channel, { closeReason, closedBy, closedAt 
     }
 
     messages.sort((left, right) => left.createdTimestamp - right.createdTimestamp);
+
     const header = [
         `Silena ticket transcript`,
         `Channel: #${channel.name} (${channel.id})`,
@@ -51,14 +89,16 @@ async function buildTicketTranscript(channel, { closeReason, closedBy, closedAt 
         'Messages (oldest first):',
         ''
     ].join('\n');
+
     const headerBytes = Buffer.byteLength(header, 'utf8');
-    if (headerBytes >= MAX_TRANSCRIPT_BYTES) throw new Error('Ticket transcript header exceeds the attachment size limit.');
+    if (headerBytes >= MAX_TRANSCRIPT_BYTES) throw new Error('Ticket transcript header exceeds limit.');
 
     let transcript = header;
     let includedMessages = 0;
     let omittedMessages = 0;
+
     for (const message of messages) {
-        const line = messageToTranscriptLine(message);
+        const line = await messageToTranscriptLine(message);
         if (Buffer.byteLength(transcript, 'utf8') + Buffer.byteLength(line, 'utf8') > MAX_TRANSCRIPT_CONTENT_BYTES) {
             omittedMessages += 1;
             continue;
@@ -69,7 +109,7 @@ async function buildTicketTranscript(channel, { closeReason, closedBy, closedAt 
 
     const truncatedByFetchLimit = messages.length === MAX_TRANSCRIPT_MESSAGES;
     if (omittedMessages || truncatedByFetchLimit) {
-        transcript += `\n[Transcript truncated: ${omittedMessages} message(s) omitted due to the 7 MiB attachment limit. The history scan was also capped at ${MAX_TRANSCRIPT_MESSAGES} messages${truncatedByFetchLimit ? '; older messages may not be included' : ''}.]\n`;
+        transcript += `\n[Transcript truncated: ${omittedMessages} message(s) omitted due to size limit.]\n`;
     }
 
     return {
