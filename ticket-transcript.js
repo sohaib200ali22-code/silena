@@ -2,53 +2,16 @@ const MAX_TRANSCRIPT_BYTES = 7 * 1024 * 1024;
 const MAX_TRANSCRIPT_CONTENT_BYTES = MAX_TRANSCRIPT_BYTES - 512;
 const MAX_TRANSCRIPT_MESSAGES = 10000;
 const PAGE_SIZE = 100;
-const DOWNLOAD_TIMEOUT_MS = 8_000;
 
-async function fetchAttachmentData(attachment) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
-    try {
-        const response = await fetch(attachment.url, { signal: controller.signal });
-        if (!response.ok) return `[attachment failed to download: ${attachment.url}]`;
-
-        const contentType = response.headers.get('content-type') || '';
-        
-        // لو الملف نصي أو كود: نطبع محتواه جوه الملف
-        if (contentType.includes('text') || contentType.includes('json') || contentType.includes('javascript')) {
-            const text = await response.text();
-            const safeText = text.length > 4000 ? text.slice(0, 4000) + '\n...[content truncated]' : text;
-            return `[attached text file: ${attachment.name}]\n\`\`\`\n${safeText}\n\`\`\``;
-        }
-
-        // لو صورة أو ميديا: نحفظ الـ Base64 Data URI
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        const base64 = buffer.toString('base64');
-        return `[attached file: ${attachment.name} (data:${contentType};base64,${base64.slice(0, 100)}... truncated data uri)]\nOriginal URL: ${attachment.url}`;
-    } catch {
-        return `[attachment download timeout: ${attachment.url}]`;
-    } finally {
-        clearTimeout(timeout);
-    }
-}
-
-async function messageToTranscriptLine(message) {
+function messageToTranscriptLine(message) {
     const timestamp = message.createdAt?.toISOString?.() ||
         new Date(message.createdTimestamp).toISOString();
     const author = `${message.author.tag || message.author.username} (${message.author.id})`;
     const content = (message.content || '').replace(/\r\n/g, '\n');
-
-    const attachmentLines = [];
-    if (message.attachments?.size) {
-        for (const attachment of message.attachments.values()) {
-            const downloadedData = await fetchAttachmentData(attachment);
-            attachmentLines.push(downloadedData);
-        }
-    }
-
+    const attachmentUrls = [...message.attachments.values()].map(attachment => attachment.url);
     const embeds = message.embeds.map(embed => embed.url).filter(Boolean);
     const extra = [
-        ...attachmentLines,
+        ...attachmentUrls.map(url => `[attachment] ${url}`),
         ...embeds.map(url => `[embed] ${url}`)
     ];
 
@@ -91,14 +54,14 @@ async function buildTicketTranscript(channel, { closeReason, closedBy, closedAt 
     ].join('\n');
 
     const headerBytes = Buffer.byteLength(header, 'utf8');
-    if (headerBytes >= MAX_TRANSCRIPT_BYTES) throw new Error('Ticket transcript header exceeds limit.');
+    if (headerBytes >= MAX_TRANSCRIPT_BYTES) throw new Error('Ticket transcript header exceeds the attachment size limit.');
 
     let transcript = header;
     let includedMessages = 0;
     let omittedMessages = 0;
 
     for (const message of messages) {
-        const line = await messageToTranscriptLine(message);
+        const line = messageToTranscriptLine(message);
         if (Buffer.byteLength(transcript, 'utf8') + Buffer.byteLength(line, 'utf8') > MAX_TRANSCRIPT_CONTENT_BYTES) {
             omittedMessages += 1;
             continue;
@@ -109,7 +72,7 @@ async function buildTicketTranscript(channel, { closeReason, closedBy, closedAt 
 
     const truncatedByFetchLimit = messages.length === MAX_TRANSCRIPT_MESSAGES;
     if (omittedMessages || truncatedByFetchLimit) {
-        transcript += `\n[Transcript truncated: ${omittedMessages} message(s) omitted due to size limit.]\n`;
+        transcript += `\n[Transcript truncated: ${omittedMessages} message(s) omitted due to the 7 MiB attachment limit. The history scan was also capped at ${MAX_TRANSCRIPT_MESSAGES} messages${truncatedByFetchLimit ? '; older messages may not be included' : ''}.]\n`;
     }
 
     return {
@@ -118,7 +81,8 @@ async function buildTicketTranscript(channel, { closeReason, closedBy, closedAt 
         messageCount: messages.length,
         includedMessages,
         omittedMessages,
-        scanLimitReached: truncatedByFetchLimit
+        scanLimitReached: truncatedByFetchLimit,
+        rawMessages: messages
     };
 }
 
@@ -137,13 +101,34 @@ async function archiveTicketTranscript(channel, archiveChannel, closeDetails) {
     }
 
     const transcript = await buildTicketTranscript(channel, closeDetails);
+    
+    // إرفاق ملف الترانسكريبت النصي
+    const filesToUpload = [{
+        attachment: transcript.buffer,
+        name: transcript.filename
+    }];
+
+    // جمع الصور والمرفقات وإعادة إرفاقها مع الرسالة لتظهر معايانتها مباشرة
+    if (transcript.rawMessages?.length) {
+        for (const msg of transcript.rawMessages) {
+            if (msg.attachments?.size) {
+                for (const attachment of msg.attachments.values()) {
+                    // ديسكورد بيسمح بـ 10 ملفات كحد أقصى للرسالة الواحدة
+                    if (filesToUpload.length < 10) {
+                        filesToUpload.push({
+                            attachment: attachment.url,
+                            name: attachment.name
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     const message = await archiveChannel.send({
         content: `Archived ticket <#${channel.id}>. Closed by ${closeDetails.closedBy.tag || closeDetails.closedBy.username}. Reason: ${closeDetails.closeReason}`,
         allowedMentions: { parse: [] },
-        files: [{
-            attachment: transcript.buffer,
-            name: transcript.filename
-        }]
+        files: filesToUpload
     });
 
     return { message, ...transcript };
