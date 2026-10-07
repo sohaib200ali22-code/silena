@@ -4,6 +4,7 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
+    ActivityType,
     ChannelType,
     Client,
     EmbedBuilder,
@@ -297,6 +298,14 @@ client.once(Events.ClientReady, async readyClient => {
     for (const guild of readyClient.guilds.cache.values()) {
         leaveUnconfiguredGuild(guild);
     }
+    readyClient.user.setPresence({
+    activities: [{
+        name: 'Silena Support',
+        type: ActivityType.Custom,
+        state: 'Watching over AniTracker | /help'
+    }],
+    status: 'dnd'
+});
 
     try {
         const result = await registerGuildCommands(config);
